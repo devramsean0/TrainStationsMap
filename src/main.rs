@@ -116,6 +116,7 @@ async fn main() {
         .route("/api/markers", get(list_markers))
         .route("/api/stations/:crs/status", patch(update_station_status))
         .route("/api/auth/login", post(login))
+        .route("/api/auth/verify", get(verify_auth))
         .with_state(state)
         .fallback_service(spa);
 
@@ -125,6 +126,14 @@ async fn main() {
 
     tracing::info!("Server running at http://localhost:3000");
     axum::serve(listener, app).await.expect("Server error");
+}
+
+async fn verify_auth(State(state): State<AppState>, headers: HeaderMap) -> StatusCode {
+    if check_auth(&state, &headers) {
+        StatusCode::NO_CONTENT
+    } else {
+        StatusCode::UNAUTHORIZED
+    }
 }
 
 async fn login(State(state): State<AppState>, Json(body): Json<LoginRequest>) -> impl IntoResponse {
