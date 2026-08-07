@@ -512,7 +512,7 @@ export default function App() {
                   "box-shadow": "0 2px 10px rgba(0,0,0,0.3)",
                 }}
               >
-                Log in to edit statuses
+                Sign In
               </button>
             }
           >
@@ -531,7 +531,7 @@ export default function App() {
                 "box-shadow": "0 2px 8px rgba(0,0,0,0.15)",
               }}
             >
-              Logged in · Log out
+              Sign Out
             </button>
           </Show>
         </div>

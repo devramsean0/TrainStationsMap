@@ -12,7 +12,7 @@ use axum::{
 };
 use reqwest::Client;
 use rusqlite::Connection;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use tokio::fs;
 use tower_http::services::{ServeDir, ServeFile};
 
@@ -29,11 +29,6 @@ struct AppState {
 #[derive(Deserialize)]
 struct LoginRequest {
     password: String,
-}
-
-#[derive(Serialize)]
-struct LoginResponse {
-    ok: bool,
 }
 
 #[derive(Deserialize)]
@@ -142,8 +137,8 @@ async fn verify_auth(State(state): State<AppState>, headers: HeaderMap) -> Statu
 
 async fn login(State(state): State<AppState>, Json(body): Json<LoginRequest>) -> impl IntoResponse {
     match &state.auth_password {
-        None => Json(LoginResponse { ok: true }).into_response(),
-        Some(pw) if *pw == body.password => Json(LoginResponse { ok: true }).into_response(),
+        None => StatusCode::OK.into_response(),
+        Some(pw) if *pw == body.password => StatusCode::OK.into_response(),
         _ => StatusCode::UNAUTHORIZED.into_response(),
     }
 }
