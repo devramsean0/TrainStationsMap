@@ -120,6 +120,7 @@ async fn main() {
         .route("/api/stations/:crs/status", patch(update_station_status))
         .route("/api/auth/login", post(login))
         .route("/api/auth/verify", get(verify_auth))
+        .route("/api/stations/refresh", post(station_refresh))
         .with_state(state)
         .fallback_service(spa);
 
@@ -156,6 +157,57 @@ fn check_auth(state: &AppState, headers: &HeaderMap) -> bool {
             .and_then(|v| v.strip_prefix("Bearer "))
             .map(|token| token == pw)
             .unwrap_or(false),
+    }
+}
+
+async fn station_refresh(State(state): State<AppState>, headers: HeaderMap) -> impl IntoResponse {
+    if !check_auth(&state, &headers) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+
+    let toc_key = std::env::var("RDM_TOCS_API_KEY").unwrap_or_default();
+    let stations_key = std::env::var("RDM_STATIONS_API_KEY").unwrap_or_default();
+
+    if toc_key.is_empty() || stations_key.is_empty() {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "RDM_TOCS_API_KEY and/or RDM_STATIONS_API_KEY not set",
+        )
+            .into_response();
+    }
+
+    let stations = match sync::fetch_stations(&state.client, &toc_key, &stations_key).await {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::error!("Station refresh fetch failed: {e:#}");
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        }
+    };
+
+    let db = state.db.clone();
+    match tokio::task::spawn_blocking(move || {
+        let conn = db.lock().unwrap();
+        db::refresh_stations(&conn, &stations)
+    })
+    .await
+    {
+        Ok(Ok(stats)) => {
+            tracing::info!(
+                "Station refresh: {} inserted, {} updated, {} CRS renamed",
+                stats.inserted,
+                stats.updated,
+                stats.crs_changed,
+            );
+            Json(stats).into_response()
+        }
+        Ok(Err(e)) => {
+            tracing::error!("DB refresh failed: {e}");
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
+        Err(e) => {
+            tracing::error!("Task error during refresh: {e}");
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
     }
 }
 

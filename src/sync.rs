@@ -17,12 +17,13 @@ pub struct StationRecord {
     pub operator_code: String,
 }
 
-pub async fn fetch_and_seed(
+/// Fetches all stations from the RDM API and returns them deduplicated,
+/// ready for either initial seeding or a refresh upsert.
+pub async fn fetch_stations(
     client: &Client,
     toc_api_key: &str,
     stations_api_key: &str,
-    conn: &std::sync::Mutex<rusqlite::Connection>,
-) -> Result<()> {
+) -> Result<Vec<crate::db::StationInsert>> {
     tracing::info!("Fetching TOC feed from RDM…");
     let toc_xml = fetch_xml(client, TOC_URL, toc_api_key)
         .await
@@ -47,9 +48,9 @@ pub async fn fetch_and_seed(
         }
     }
 
-    // Stations served by multiple TOCs appear more than once; keep first occurrence
+    // Stations served by multiple TOCs appear more than once; keep first occurrence.
     let mut seen = HashSet::new();
-    let inserts: Vec<crate::db::StationInsert> = all_stations
+    let inserts = all_stations
         .into_iter()
         .filter(|s| seen.insert(s.crs_code.clone()))
         .map(|s| {
@@ -66,14 +67,24 @@ pub async fn fetch_and_seed(
                 operator_name,
             }
         })
-        .collect();
+        .collect::<Vec<_>>();
 
-    let inserted = inserts.len();
-    tracing::info!("Inserting {inserted} unique stations into database…");
+    tracing::info!("Fetched {} unique stations from API", inserts.len());
+    Ok(inserts)
+}
+
+pub async fn fetch_and_seed(
+    client: &Client,
+    toc_api_key: &str,
+    stations_api_key: &str,
+    conn: &std::sync::Mutex<rusqlite::Connection>,
+) -> Result<()> {
+    let stations = fetch_stations(client, toc_api_key, stations_api_key).await?;
+    let n = stations.len();
+    tracing::info!("Inserting {n} stations into database…");
     let db = conn.lock().unwrap();
-    crate::db::insert_stations(&db, &inserts).context("DB insert failed")?;
-    tracing::info!("Seeded {inserted} stations");
-
+    crate::db::insert_stations(&db, &stations).context("DB insert failed")?;
+    tracing::info!("Seeded {n} stations");
     Ok(())
 }
 

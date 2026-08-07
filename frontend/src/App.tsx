@@ -12,6 +12,12 @@ interface MarkerData {
   status: string;
 }
 
+interface SyncStats {
+  inserted: number;
+  updated: number;
+  crs_changed: number;
+}
+
 const STATUS_COLOURS: Record<string, string> = {
   unvisited: "#4080f0",
   visited: "#f0c040",
@@ -45,13 +51,13 @@ function getIcon(colour: string): L.DivIcon {
   return iconCache[colour];
 }
 
-// Auth state — module-level so buildPopup can read authed()
+// Auth state — module-level so buildPopup can read authed() at popup-open time.
 const [authRequired, setAuthRequired] = createSignal(false);
 const [authed, setAuthed] = createSignal(false);
 const [authToken, setAuthToken] = createSignal<string | null>(null);
 
-// buildPopup reads authed() at call time; Leaflet's lazy binding means it
-// is called fresh each time the popup opens, so auth changes are reflected.
+// buildPopup reads authed() at call time. Leaflet's lazy function binding means
+// this is called fresh on every popup open, so auth changes are reflected.
 function buildPopup(m: MarkerData): string {
   const buttons = authed()
     ? `<div style="display:flex;gap:4px">
@@ -119,6 +125,8 @@ export default function App() {
 
   const [stations, setStations] = createSignal<MarkerData[]>([]);
   const [search, setSearch] = createSignal("");
+  const [syncing, setSyncing] = createSignal(false);
+  const [syncResult, setSyncResult] = createSignal<string | null>(null);
 
   const filtered = () => {
     const q = search().toLowerCase().trim();
@@ -169,6 +177,69 @@ export default function App() {
     return false;
   }
 
+  // Attach a Leaflet marker for one station and register it in leafletMarkers.
+  function addMarker(m: MarkerData) {
+    const marker = L.marker([m.lat, m.lng], { icon: getIcon(m.colour) });
+
+    marker.bindPopup(() => {
+      const current = stations().find((s) => s.crs === m.crs) ?? m;
+      return buildPopup(current);
+    });
+
+    marker.on("popupopen", () => {
+      const popupEl = marker.getPopup()!.getElement()!;
+      popupEl
+        .querySelectorAll<HTMLButtonElement>("[data-crs][data-status]")
+        .forEach((btn) => {
+          btn.addEventListener("click", async () => {
+            const success = await applyStatus(btn.dataset.crs!, btn.dataset.status!);
+            if (success) marker.closePopup();
+          });
+        });
+    });
+
+    marker.addTo(map!);
+    leafletMarkers.set(m.crs, marker);
+  }
+
+  // Tear down all markers and rebuild from /api/markers.
+  async function reloadMarkers() {
+    leafletMarkers.forEach((m) => m.remove());
+    leafletMarkers.clear();
+    const data: MarkerData[] = await fetch("/api/markers").then((r) => r.json());
+    setStations(data);
+    for (const m of data) addMarker(m);
+  }
+
+  async function triggerSync() {
+    setSyncing(true);
+    setSyncResult(null);
+
+    const token = authToken();
+    const headers: Record<string, string> = {};
+    if (token) headers["Authorization"] = `Bearer ${token}`;
+
+    try {
+      const res = await fetch("/api/stations/refresh", { method: "POST", headers });
+      if (res.ok) {
+        const s = (await res.json()) as SyncStats;
+        setSyncResult(
+          `Sync complete — ${s.inserted} new, ${s.updated} updated, ${s.crs_changed} renamed`,
+        );
+        await reloadMarkers();
+      } else if (res.status === 503) {
+        setSyncResult("Server error: RDM API keys not configured");
+      } else {
+        setSyncResult(`Sync failed (${res.status})`);
+      }
+    } catch {
+      setSyncResult("Network error during sync");
+    } finally {
+      setSyncing(false);
+      setTimeout(() => setSyncResult(null), 8000);
+    }
+  }
+
   function flyToStation(s: MarkerData) {
     if (!map) return;
     map.once("moveend", () => leafletMarkers.get(s.crs)?.openPopup());
@@ -176,10 +247,9 @@ export default function App() {
   }
 
   onMount(async () => {
-    // Check whether auth is required, then validate any stored token.
+    // Determine whether auth is required, then validate any stored token.
     const noCredRes = await fetch("/api/auth/verify");
     if (noCredRes.ok) {
-      // No password configured — treat as permanently authed.
       setAuthRequired(false);
       setAuthed(true);
     } else {
@@ -208,32 +278,7 @@ export default function App() {
 
     const data: MarkerData[] = await fetch("/api/markers").then((r) => r.json());
     setStations(data);
-
-    for (const m of data) {
-      const marker = L.marker([m.lat, m.lng], { icon: getIcon(m.colour) });
-
-      // Lazy binding: Leaflet calls this each time the popup opens, so it
-      // always reflects the current auth state and station data.
-      marker.bindPopup(() => {
-        const current = stations().find((s) => s.crs === m.crs) ?? m;
-        return buildPopup(current);
-      });
-
-      marker.on("popupopen", () => {
-        const popupEl = marker.getPopup()!.getElement()!;
-        popupEl
-          .querySelectorAll<HTMLButtonElement>("[data-crs][data-status]")
-          .forEach((btn) => {
-            btn.addEventListener("click", async () => {
-              const success = await applyStatus(btn.dataset.crs!, btn.dataset.status!);
-              if (success) marker.closePopup();
-            });
-          });
-      });
-
-      marker.addTo(map!);
-      leafletMarkers.set(m.crs, marker);
-    }
+    for (const m of data) addMarker(m);
   });
 
   onCleanup(() => map?.remove());
@@ -260,6 +305,7 @@ export default function App() {
           "font-family": "sans-serif",
         }}
       >
+        {/* Header */}
         <div style={{ padding: "12px 14px 8px", "border-bottom": "1px solid #eee" }}>
           <div
             style={{
@@ -270,8 +316,46 @@ export default function App() {
             }}
           >
             <strong style={{ "font-size": "14px" }}>Stations</strong>
-            <span style={{ "font-size": "11px", color: "#666" }}>{counts().total} total</span>
+            <div style={{ display: "flex", "align-items": "center", gap: "8px" }}>
+              <span style={{ "font-size": "11px", color: "#666" }}>{counts().total} total</span>
+              <Show when={authed()}>
+                <button
+                  onClick={triggerSync}
+                  disabled={syncing()}
+                  style={{
+                    padding: "3px 10px",
+                    background: syncing() ? "#ccc" : "#2563eb",
+                    color: "white",
+                    border: "none",
+                    "border-radius": "4px",
+                    cursor: syncing() ? "default" : "pointer",
+                    "font-size": "11px",
+                    "font-weight": "600",
+                    "font-family": "sans-serif",
+                  }}
+                >
+                  {syncing() ? "Syncing…" : "Sync"}
+                </button>
+              </Show>
+            </div>
           </div>
+
+          {/* Sync result banner */}
+          <Show when={syncResult()}>
+            <div
+              style={{
+                "font-size": "11px",
+                color: "#166534",
+                background: "#dcfce7",
+                border: "1px solid #86efac",
+                "border-radius": "4px",
+                padding: "4px 8px",
+                "margin-bottom": "6px",
+              }}
+            >
+              {syncResult()}
+            </div>
+          </Show>
 
           <div style={{ display: "flex", gap: "6px", "margin-bottom": "8px" }}>
             {(
@@ -318,15 +402,11 @@ export default function App() {
           </div>
         </div>
 
+        {/* Station list */}
         <div style={{ "overflow-y": "auto", flex: "1" }}>
           <For each={filtered()}>
             {(s) => (
-              <div
-                style={{
-                  padding: "8px 14px",
-                  "border-bottom": "1px solid #f0f0f0",
-                }}
-              >
+              <div style={{ padding: "8px 14px", "border-bottom": "1px solid #f0f0f0" }}>
                 <div
                   style={{
                     display: "flex",
