@@ -1,4 +1,4 @@
-import { onCleanup, onMount } from "solid-js";
+import { createSignal, onCleanup, onMount } from "solid-js";
 import L from "leaflet";
 import "leaflet/dist/leaflet.css";
 
@@ -67,6 +67,33 @@ function buildPopup(m: MarkerData): string {
   `;
 }
 
+const [authToken, setAuthToken] = createSignal<string | null>(
+  sessionStorage.getItem("authToken"),
+);
+
+async function ensureAuth(): Promise<string | null> {
+  const token = authToken();
+  if (token) return token;
+
+  const pw = window.prompt("Enter password to update station status:");
+  if (!pw) return null;
+
+  const res = await fetch("/api/auth/login", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ password: pw }),
+  });
+
+  if (res.ok) {
+    sessionStorage.setItem("authToken", pw);
+    setAuthToken(pw);
+    return pw;
+  }
+
+  alert("Incorrect password.");
+  return null;
+}
+
 export default function App() {
   let container: HTMLDivElement | undefined;
   let map: L.Map | undefined;
@@ -97,11 +124,22 @@ export default function App() {
             btn.addEventListener("click", async () => {
               const crs = btn.dataset.crs!;
               const status = btn.dataset.status!;
-              await fetch(`/api/stations/${crs}/status`, {
+              const token = await ensureAuth();
+              if (!token) return;
+              const res = await fetch(`/api/stations/${crs}/status`, {
                 method: "PATCH",
-                headers: { "Content-Type": "application/json" },
+                headers: {
+                  "Content-Type": "application/json",
+                  Authorization: `Bearer ${token}`,
+                },
                 body: JSON.stringify({ status }),
               });
+              if (res.status === 401) {
+                sessionStorage.removeItem("authToken");
+                setAuthToken(null);
+                alert("Authentication failed — please try again.");
+                return;
+              }
               const colour = STATUS_COLOURS[status] ?? STATUS_COLOURS.unvisited;
               leafletMarkers.get(crs)?.setIcon(getIcon(colour));
               marker.closePopup();

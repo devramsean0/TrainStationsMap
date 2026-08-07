@@ -5,14 +5,14 @@ use std::sync::{Arc, Mutex};
 
 use axum::{
     extract::{Path, State},
-    http::{header, StatusCode},
+    http::{header, HeaderMap, StatusCode},
     response::{IntoResponse, Json, Response},
-    routing::{get, patch},
+    routing::{get, patch, post},
     Router,
 };
 use reqwest::Client;
 use rusqlite::Connection;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use tokio::fs;
 use tower_http::services::{ServeDir, ServeFile};
 
@@ -23,6 +23,17 @@ const OSM_TILE_URL: &str = "https://tile.openstreetmap.org";
 struct AppState {
     client: Arc<Client>,
     db: Arc<Mutex<Connection>>,
+    auth_password: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct LoginRequest {
+    password: String,
+}
+
+#[derive(Serialize)]
+struct LoginResponse {
+    ok: bool,
 }
 
 #[derive(Deserialize)]
@@ -85,9 +96,17 @@ async fn main() {
         }
     }
 
+    let auth_password = std::env::var("AUTH_PASSWORD")
+        .ok()
+        .filter(|s| !s.is_empty());
+    if auth_password.is_none() {
+        tracing::warn!("AUTH_PASSWORD not set — status updates are unauthenticated");
+    }
+
     let state = AppState {
         client: Arc::new(client),
         db,
+        auth_password,
     };
 
     let spa = ServeDir::new("frontend/dist").fallback(ServeFile::new("frontend/dist/index.html"));
@@ -96,6 +115,7 @@ async fn main() {
         .route("/api/tiles/:z/:x/:y", get(proxy_tile))
         .route("/api/markers", get(list_markers))
         .route("/api/stations/:crs/status", patch(update_station_status))
+        .route("/api/auth/login", post(login))
         .with_state(state)
         .fallback_service(spa);
 
@@ -105,6 +125,26 @@ async fn main() {
 
     tracing::info!("Server running at http://localhost:3000");
     axum::serve(listener, app).await.expect("Server error");
+}
+
+async fn login(State(state): State<AppState>, Json(body): Json<LoginRequest>) -> impl IntoResponse {
+    match &state.auth_password {
+        None => Json(LoginResponse { ok: true }).into_response(),
+        Some(pw) if *pw == body.password => Json(LoginResponse { ok: true }).into_response(),
+        _ => StatusCode::UNAUTHORIZED.into_response(),
+    }
+}
+
+fn check_auth(state: &AppState, headers: &HeaderMap) -> bool {
+    match &state.auth_password {
+        None => true,
+        Some(pw) => headers
+            .get(header::AUTHORIZATION)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.strip_prefix("Bearer "))
+            .map(|token| token == pw)
+            .unwrap_or(false),
+    }
 }
 
 async fn proxy_tile(
@@ -166,8 +206,12 @@ async fn list_markers(State(state): State<AppState>) -> Response {
 async fn update_station_status(
     Path(crs): Path<String>,
     State(state): State<AppState>,
+    headers: HeaderMap,
     Json(body): Json<StatusUpdate>,
 ) -> StatusCode {
+    if !check_auth(&state, &headers) {
+        return StatusCode::UNAUTHORIZED;
+    }
     let db = state.db.clone();
     let status = body.status.as_str().to_string();
 
