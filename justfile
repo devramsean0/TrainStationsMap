@@ -12,3 +12,15 @@ run *ARGS:
 # Run 'bacon' to run the project (auto-recompiles)
 watch *ARGS:
 	bacon --job run -- -- {{ ARGS }}
+
+# Install frontend dependencies
+frontend-install:
+    cd frontend && npm install
+
+# Build the frontend (run frontend-install first if needed)
+frontend-build:
+    cd frontend && npm run build
+
+# Run the Vite dev server (proxies /api to localhost:3000)
+frontend-dev:
+    cd frontend && npm run dev

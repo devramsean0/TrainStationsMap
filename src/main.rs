@@ -1,7 +1,7 @@
 use axum::{
     extract::{Path, State},
     http::{header, StatusCode},
-    response::{Html, IntoResponse, Json, Response},
+    response::{IntoResponse, Json, Response},
     routing::get,
     Router,
 };
@@ -9,6 +9,7 @@ use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio::fs;
+use tower_http::services::{ServeDir, ServeFile};
 
 const TILE_CACHE_DIR: &str = "./tile_cache";
 const OSM_TILE_URL: &str = "https://tile.openstreetmap.org";
@@ -66,11 +67,13 @@ async fn main() {
         client: Arc::new(client),
     };
 
+    let spa = ServeDir::new("frontend/dist").fallback(ServeFile::new("frontend/dist/index.html"));
+
     let app = Router::new()
-        .route("/", get(serve_index))
-        .route("/tiles/:z/:x/:y", get(proxy_tile))
+        .route("/api/tiles/:z/:x/:y", get(proxy_tile))
         .route("/api/markers", get(list_markers))
-        .with_state(state);
+        .with_state(state)
+        .fallback_service(spa);
 
     let listener = tokio::net::TcpListener::bind("0.0.0.0:3000")
         .await
@@ -78,10 +81,6 @@ async fn main() {
 
     tracing::info!("Server running at http://localhost:3000");
     axum::serve(listener, app).await.expect("Server error");
-}
-
-async fn serve_index() -> Html<&'static str> {
-    Html(INDEX_HTML)
 }
 
 async fn proxy_tile(
@@ -127,80 +126,3 @@ async fn proxy_tile(
 async fn list_markers() -> Json<Vec<Marker>> {
     Json(vec![])
 }
-
-const INDEX_HTML: &str = r#"<!DOCTYPE html>
-<html lang="en">
-<head>
-    <title>UK Train Stations Map</title>
-    <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
-          integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""/>
-    <style>
-        * { box-sizing: border-box; }
-        body { margin: 0; padding: 0; font-family: sans-serif; }
-        #map { width: 100vw; height: 100vh; }
-    </style>
-</head>
-<body>
-    <div id="map"></div>
-    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
-            integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
-    <script>
-        const ukBounds = L.latLngBounds(
-            L.latLng(49.8, -8.7),
-            L.latLng(60.9, 1.9)
-        );
-
-        const map = L.map('map', {
-            maxBounds: ukBounds,
-            maxBoundsViscosity: 1.0,
-            minZoom: 5,
-            maxZoom: 19,
-        }).setView([54.5, -3.5], 6);
-
-        L.tileLayer('/tiles/{z}/{x}/{y}', {
-            attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
-            minZoom: 5,
-            maxZoom: 19,
-            bounds: ukBounds,
-        }).addTo(map);
-
-        const markerIcons = {};
-
-        function getColourIcon(colour) {
-            if (!markerIcons[colour]) {
-                markerIcons[colour] = L.divIcon({
-                    className: '',
-                    html: `<div style="
-                        width: 16px;
-                        height: 16px;
-                        background-color: ${colour};
-                        border: 2px solid rgba(0,0,0,0.5);
-                        border-radius: 50%;
-                        box-shadow: 0 1px 3px rgba(0,0,0,0.4);
-                    "></div>`,
-                    iconSize: [16, 16],
-                    iconAnchor: [8, 8],
-                    popupAnchor: [0, -10],
-                });
-            }
-            return markerIcons[colour];
-        }
-
-        async function loadMarkers() {
-            const resp = await fetch('/api/markers');
-            const markers = await resp.json();
-            for (const m of markers) {
-                const marker = L.marker([m.lat, m.lng], { icon: getColourIcon(m.colour) });
-                if (m.label) {
-                    marker.bindPopup(m.label);
-                }
-                marker.addTo(map);
-            }
-        }
-
-        loadMarkers();
-    </script>
-</body>
-</html>"#;

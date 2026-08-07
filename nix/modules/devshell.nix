@@ -11,6 +11,7 @@
         just
         nixd # Nix language server
         bacon
+        nodejs_22
       ];
     };
   };

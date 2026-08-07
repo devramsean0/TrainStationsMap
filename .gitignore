@@ -5,3 +5,5 @@
 
 /.pre-commit-config.yaml
 /tile_cache
+/frontend/node_modules
+/frontend/dist
