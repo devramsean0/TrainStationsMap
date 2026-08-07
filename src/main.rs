@@ -109,7 +109,10 @@ async fn main() {
         auth_password,
     };
 
-    let spa = ServeDir::new("frontend/dist").fallback(ServeFile::new("frontend/dist/index.html"));
+    let frontend_dist =
+        std::env::var("FRONTEND_DIST").unwrap_or_else(|_| "frontend/dist".to_string());
+    let spa = ServeDir::new(&frontend_dist)
+        .fallback(ServeFile::new(format!("{frontend_dist}/index.html")));
 
     let app = Router::new()
         .route("/api/tiles/:z/:x/:y", get(proxy_tile))

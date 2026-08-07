@@ -14,6 +14,14 @@
         ]
       );
     };
-    packages.default = self'.packages.train-stations-map;
+    packages.default = pkgs.symlinkJoin {
+      name = "train-stations-map";
+      paths = [ self'.packages.train-stations-map ];
+      nativeBuildInputs = [ pkgs.makeWrapper ];
+      postBuild = ''
+        wrapProgram $out/bin/train-stations-map \
+          --set FRONTEND_DIST ${self'.packages.frontend}
+      '';
+    };
   };
 }
