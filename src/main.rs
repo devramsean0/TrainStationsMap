@@ -119,9 +119,11 @@ async fn main() {
         .with_state(state)
         .fallback_service(spa);
 
-    let listener = tokio::net::TcpListener::bind("0.0.0.0:3000")
-        .await
-        .expect("Failed to bind to port 3000");
+    let listener = tokio::net::TcpListener::bind(
+        std::env::var("ADDR").unwrap_or_else(|_| "0.0.0.0:3000".to_string()),
+    )
+    .await
+    .expect("Failed to bind to port 3000");
 
     tracing::info!("Server running at http://localhost:3000");
     axum::serve(listener, app).await.expect("Server error");

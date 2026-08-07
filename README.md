@@ -18,6 +18,7 @@ This is configured through a couple of environment variables
 | AUTH_PASSWORD | The password you will use to "sign in" | Password1234 | 
 | RDM_TOCS_API_KEY | The "Consumer Key" of the Knowledgebase TOCS data prodict | T9axxxxxxxxxxxxxxxxxxxxxx5Drt |
 | RDM_STATIONS_API_KEY | The "Consumer Key" of the Knowledgebase Stations data prodict | T9axxxxxxxxxxxxxxxxxxxxxx5Drt |
+| ADDR | The address + port to listen on, OPTIONAL, has a default | 0.0.0.0:3000 |
 
 You also need to give the stations.db file and the tile_cache folder a persistent location as they store the state and cache the OSM tiles. This is obviously different per method and covered below
 
