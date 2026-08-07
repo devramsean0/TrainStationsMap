@@ -1,50 +1,55 @@
-A template Rust project with fully functional and no-frills Nix support, as well as builtin VSCode configuration to get IDE experience without any manual setup (just [install direnv](https://nixos.asia/en/direnv), open in VSCode and accept the suggestions). It uses [crane](https://crane.dev/), via [rust-flake](https://github.com/juspay/rust-flake).
+# Train Station Map
+A interactive Map for UK Mainline station ticking.
 
-> [!NOTE]
-> If you are looking for the original template based on [this blog post](https://srid.ca/rust-nix)'s use of `crate2nix`, browse from [this tag](https://github.com/srid/train-stations-map/tree/crate2nix). The evolution of this template can be gleaned from [releases](https://github.com/srid/train-stations-map/releases).
+# Running an instance
+## Prequsites
 
-## Usage
+You need access to the following data products from the [Rail Data Marketplace](https://raildata.org.uk):
+    1. https://raildata.org.uk/dashboard/dataProduct/P-88ffe920-471c-4fd9-8e0d-95d5b9b7a257/overview
+    2. https://raildata.org.uk/dashboard/dataProduct/P-49f7a182-c71b-45a2-b0f0-3b52c9a2968c/overview
 
-You can use [omnix](https://omnix.page/om/init.html)[^omnix] to initialize this template:
+You also need a server capable of running either a docker container or a nix derivation
+
+## Configuration
+This is configured through a couple of environment variables
+| Variable | Description | Example |
+| --- | --- | --- | --- |
+| RUST_LOG | The Log Level of the rust webserver | info |
+| AUTH_PASSWORD | The password you will use to "sign in" | Password1234 | 
+| RDM_TOCS_API_KEY | The "Consumer Key" of the Knowledgebase TOCS data prodict | T9axxxxxxxxxxxxxxxxxxxxxx5Drt |
+| RDM_STATIONS_API_KEY | The "Consumer Key" of the Knowledgebase Stations data prodict | T9axxxxxxxxxxxxxxxxxxxxxx5Drt |
+
+You also need to give the stations.db file and the tile_cache folder a persistent location as they store the state and cache the OSM tiles. This is obviously different per method and covered below
+
+## Hosting
+
+### Docker
+This docker compose file would probably work as an example. It's untested as I don't use docker :p
+
+```yaml
+services:
+  train-stations-map:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "3000:3000"
+    dns:
+      - 1.1.1.1
+      - 8.8.8.8
+    environment:
+      RUST_LOG: info
+      AUTH_PASSWORD: change-me
+      RDM_TOCS_API_KEY: change-me
+      RDM_STATIONS_API_KEY: change-me
+      FRONTEND_DIST: /opt/train-stations-map/frontend/dist
+    volumes:
+      - app-data:/app
+    restart: unless-stopped
+
+volumes:
+  app-data:
 ```
-nix run nixpkgs#omnix -- init github:devramsean0/train-stations-map -o ~/my-rust-project
-```
 
-[^omnix]: If initializing manually, make sure to:
-    - Change `name` in Cargo.toml.
-    - Run `cargo generate-lockfile` in the nix shelld
-
-## Adapting this template
-
-- There are two CI workflows, and one of them uses Nix which is slower (unless you configure a cache) than the other one based on rustup. Pick one or the other depending on your trade-offs.
-
-## Development (Flakes)
-
-This repo uses [Flakes](https://nixos.asia/en/flakes) from the get-go.
-
-```bash
-# Dev shell
-nix develop
-
-# or run via cargo
-nix develop -c cargo run
-
-# build
-nix build
-```
-
-We also provide a [`justfile`](https://just.systems/) for Makefile'esque commands to be run inside of the devShell.
-
-## Tips
-
-- Run `nix flake update` to update all flake inputs.
-- Run `nix --accept-flake-config run github:juspay/omnix ci` to build _all_ outputs.
-- [pre-commit] hooks will automatically be setup in Nix shell. You can also run `pre-commit run -a` manually to run the hooks (e.g.: to autoformat the project tree using `rustfmt`, `nixpkgs-fmt`, etc.).
-
-## Discussion
-
-- [Zulip](https://nixos.zulipchat.com/#narrow/stream/413950-nix)
-
-## See Also
-
-- [nixos.wiki: Packaging Rust projects with nix](https://nixos.wiki/wiki/Rust#Packaging_Rust_projects_with_nix)
+### NixOS
+Just write a systemd service :p It's not hard
