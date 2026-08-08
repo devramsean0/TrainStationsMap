@@ -112,69 +112,49 @@ async fn fetch_xml(client: &Client, url: &str, api_key: &str) -> Result<String> 
     Ok(body)
 }
 
-fn parse_stations(xml: &str) -> Result<Vec<StationRecord>> {
+fn parse_xml_records<T, F>(xml: &str, record_tag: &str, mut handle: F) -> Result<Vec<T>>
+where
+    F: FnMut(&HashMap<String, String>) -> Option<T>,
+{
     let mut reader = Reader::from_str(xml);
     let mut buf = Vec::new();
     let mut out = Vec::new();
 
     let mut depth: usize = 0;
-    let mut station_depth: usize = 0;
-    let mut in_station = false;
+    let mut record_depth: usize = 0;
+    let mut in_record = false;
     let mut field = String::new();
-
-    let mut crs = String::new();
-    let mut name = String::new();
-    let mut lat = 0f64;
-    let mut lng = 0f64;
-    let mut op = String::new();
+    let mut fields: HashMap<String, String> = HashMap::new();
 
     loop {
         match reader.read_event_into(&mut buf) {
             Ok(Event::Start(e)) => {
                 depth += 1;
                 let tag = local_name(&e.name());
-                if tag == "Station" {
-                    in_station = true;
-                    station_depth = depth;
-                    crs.clear();
-                    name.clear();
-                    lat = 0.0;
-                    lng = 0.0;
-                    op.clear();
-                } else if in_station && depth == station_depth + 1 {
+                if tag == record_tag {
+                    in_record = true;
+                    record_depth = depth;
+                    fields.clear();
+                } else if in_record && depth == record_depth + 1 {
                     field = tag;
                 }
             }
             Ok(Event::Text(e)) => {
-                if in_station && !field.is_empty() {
-                    let text = e.unescape().unwrap_or_default().into_owned();
-                    match field.as_str() {
-                        "CrsCode" => crs = text,
-                        "Name" => name = text,
-                        "Latitude" => lat = text.trim().parse().unwrap_or(0.0),
-                        "Longitude" => lng = text.trim().parse().unwrap_or(0.0),
-                        "StationOperator" => op = text,
-                        _ => {}
-                    }
+                if in_record && !field.is_empty() {
+                    fields.insert(field.clone(), e.unescape().unwrap_or_default().into_owned());
                 }
             }
             Ok(Event::End(e)) => {
                 let tag = local_name(&e.name());
-                if in_station {
-                    if depth == station_depth + 1 {
+                if in_record {
+                    if depth == record_depth + 1 {
                         field.clear();
                     }
-                    if tag == "Station" && depth == station_depth {
-                        if !crs.is_empty() && (lat != 0.0 || lng != 0.0) {
-                            out.push(StationRecord {
-                                crs_code: crs.clone(),
-                                name: name.clone(),
-                                lat,
-                                lng,
-                                operator_code: op.clone(),
-                            });
+                    if tag == record_tag && depth == record_depth {
+                        if let Some(record) = handle(&fields) {
+                            out.push(record);
                         }
-                        in_station = false;
+                        in_record = false;
                     }
                 }
                 depth = depth.saturating_sub(1);
@@ -189,65 +169,39 @@ fn parse_stations(xml: &str) -> Result<Vec<StationRecord>> {
     Ok(out)
 }
 
-fn parse_tocs(xml: &str) -> Result<HashMap<String, String>> {
-    let mut reader = Reader::from_str(xml);
-    let mut buf = Vec::new();
-    let mut out = HashMap::new();
-
-    let mut depth: usize = 0;
-    let mut toc_depth: usize = 0;
-    let mut in_toc = false;
-    let mut field = String::new();
-    let mut code = String::new();
-    let mut toc_name = String::new();
-
-    loop {
-        match reader.read_event_into(&mut buf) {
-            Ok(Event::Start(e)) => {
-                depth += 1;
-                let tag = local_name(&e.name());
-                if tag == "TrainOperatingCompany" {
-                    in_toc = true;
-                    toc_depth = depth;
-                    code.clear();
-                    toc_name.clear();
-                } else if in_toc && depth == toc_depth + 1 {
-                    field = tag;
-                }
-            }
-            Ok(Event::Text(e)) => {
-                if in_toc && !field.is_empty() {
-                    let text = e.unescape().unwrap_or_default().into_owned();
-                    match field.as_str() {
-                        "AtocCode" => code = text,
-                        "Name" => toc_name = text,
-                        _ => {}
-                    }
-                }
-            }
-            Ok(Event::End(e)) => {
-                let tag = local_name(&e.name());
-                if in_toc {
-                    if depth == toc_depth + 1 {
-                        field.clear();
-                    }
-                    if tag == "TrainOperatingCompany" && depth == toc_depth {
-                        if !code.is_empty() {
-                            out.insert(code.clone(), toc_name.clone());
-                        }
-                        in_toc = false;
-                    }
-                }
-                depth = depth.saturating_sub(1);
-            }
-            Ok(Event::Eof) => break,
-            Err(e) => return Err(anyhow::anyhow!("XML error: {e}")),
-            _ => {}
+fn parse_stations(xml: &str) -> Result<Vec<StationRecord>> {
+    parse_xml_records(xml, "Station", |fields| {
+        let crs = fields.get("CrsCode").cloned().unwrap_or_default();
+        let lat: f64 = fields
+            .get("Latitude")
+            .and_then(|v| v.trim().parse().ok())
+            .unwrap_or(0.0);
+        let lng: f64 = fields
+            .get("Longitude")
+            .and_then(|v| v.trim().parse().ok())
+            .unwrap_or(0.0);
+        if crs.is_empty() || (lat == 0.0 && lng == 0.0) {
+            return None;
         }
-        buf.clear();
-    }
+        Some(StationRecord {
+            crs_code: crs,
+            name: fields.get("Name").cloned().unwrap_or_default(),
+            lat,
+            lng,
+            operator_code: fields.get("StationOperator").cloned().unwrap_or_default(),
+        })
+    })
+}
 
-    Ok(out)
+fn parse_tocs(xml: &str) -> Result<HashMap<String, String>> {
+    let pairs = parse_xml_records(xml, "TrainOperatingCompany", |fields| {
+        let code = fields.get("AtocCode").cloned().unwrap_or_default();
+        if code.is_empty() {
+            return None;
+        }
+        Some((code, fields.get("Name").cloned().unwrap_or_default()))
+    })?;
+    Ok(pairs.into_iter().collect())
 }
 
 fn local_name(name: &quick_xml::name::QName<'_>) -> String {

@@ -146,6 +146,41 @@ async fn main() {
     axum::serve(listener, app).await.expect("Server error");
 }
 
+async fn db_op<F, T>(db: Arc<Mutex<Connection>>, op: F) -> Result<T, StatusCode>
+where
+    F: FnOnce(&Connection) -> rusqlite::Result<T> + Send + 'static,
+    T: Send + 'static,
+{
+    match tokio::task::spawn_blocking(move || {
+        let conn = db.lock().unwrap();
+        op(&conn)
+    })
+    .await
+    {
+        Ok(Ok(val)) => Ok(val),
+        Ok(Err(e)) => {
+            tracing::error!("DB error: {e}");
+            Err(StatusCode::INTERNAL_SERVER_ERROR)
+        }
+        Err(e) => {
+            tracing::error!("Task join error: {e}");
+            Err(StatusCode::INTERNAL_SERVER_ERROR)
+        }
+    }
+}
+
+fn check_auth(state: &AppState, headers: &HeaderMap) -> bool {
+    match &state.auth_password {
+        None => true,
+        Some(pw) => headers
+            .get(header::AUTHORIZATION)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.strip_prefix("Bearer "))
+            .map(|token| token == pw)
+            .unwrap_or(false),
+    }
+}
+
 async fn verify_auth(State(state): State<AppState>, headers: HeaderMap) -> StatusCode {
     if check_auth(&state, &headers) {
         StatusCode::NO_CONTENT
@@ -159,18 +194,6 @@ async fn login(State(state): State<AppState>, Json(body): Json<LoginRequest>) ->
         None => StatusCode::OK.into_response(),
         Some(pw) if *pw == body.password => StatusCode::OK.into_response(),
         _ => StatusCode::UNAUTHORIZED.into_response(),
-    }
-}
-
-fn check_auth(state: &AppState, headers: &HeaderMap) -> bool {
-    match &state.auth_password {
-        None => true,
-        Some(pw) => headers
-            .get(header::AUTHORIZATION)
-            .and_then(|v| v.to_str().ok())
-            .and_then(|v| v.strip_prefix("Bearer "))
-            .map(|token| token == pw)
-            .unwrap_or(false),
     }
 }
 
@@ -198,14 +221,8 @@ async fn station_refresh(State(state): State<AppState>, headers: HeaderMap) -> i
         }
     };
 
-    let db = state.db.clone();
-    match tokio::task::spawn_blocking(move || {
-        let conn = db.lock().unwrap();
-        db::refresh_stations(&conn, &stations)
-    })
-    .await
-    {
-        Ok(Ok(stats)) => {
+    match db_op(state.db, move |conn| db::refresh_stations(conn, &stations)).await {
+        Ok(stats) => {
             tracing::info!(
                 "Station refresh: {} inserted, {} updated, {} CRS renamed",
                 stats.inserted,
@@ -214,14 +231,7 @@ async fn station_refresh(State(state): State<AppState>, headers: HeaderMap) -> i
             );
             Json(stats).into_response()
         }
-        Ok(Err(e)) => {
-            tracing::error!("DB refresh failed: {e}");
-            StatusCode::INTERNAL_SERVER_ERROR.into_response()
-        }
-        Err(e) => {
-            tracing::error!("Task error during refresh: {e}");
-            StatusCode::INTERNAL_SERVER_ERROR.into_response()
-        }
+        Err(s) => s.into_response(),
     }
 }
 
@@ -262,42 +272,16 @@ async fn proxy_tile(
 }
 
 async fn list_markers(State(state): State<AppState>) -> Response {
-    let db = state.db.clone();
-    match tokio::task::spawn_blocking(move || {
-        let conn = db.lock().unwrap();
-        db::get_markers(&conn)
-    })
-    .await
-    {
-        Ok(Ok(markers)) => Json(markers).into_response(),
-        Ok(Err(e)) => {
-            tracing::error!("DB error listing markers: {e}");
-            StatusCode::INTERNAL_SERVER_ERROR.into_response()
-        }
-        Err(e) => {
-            tracing::error!("Task error listing markers: {e}");
-            StatusCode::INTERNAL_SERVER_ERROR.into_response()
-        }
+    match db_op(state.db, db::get_markers).await {
+        Ok(markers) => Json(markers).into_response(),
+        Err(s) => s.into_response(),
     }
 }
 
 async fn list_labels(State(state): State<AppState>) -> Response {
-    let db = state.db.clone();
-    match tokio::task::spawn_blocking(move || {
-        let conn = db.lock().unwrap();
-        db::get_labels(&conn)
-    })
-    .await
-    {
-        Ok(Ok(labels)) => Json(labels).into_response(),
-        Ok(Err(e)) => {
-            tracing::error!("DB error listing labels: {e}");
-            StatusCode::INTERNAL_SERVER_ERROR.into_response()
-        }
-        Err(e) => {
-            tracing::error!("Task error listing labels: {e}");
-            StatusCode::INTERNAL_SERVER_ERROR.into_response()
-        }
+    match db_op(state.db, db::get_labels).await {
+        Ok(labels) => Json(labels).into_response(),
+        Err(s) => s.into_response(),
     }
 }
 
@@ -309,22 +293,13 @@ async fn create_label(
     if !check_auth(&state, &headers) {
         return StatusCode::UNAUTHORIZED.into_response();
     }
-    let db = state.db.clone();
-    match tokio::task::spawn_blocking(move || {
-        let conn = db.lock().unwrap();
-        db::create_label(&conn, &body.name, &body.colour)
+    match db_op(state.db, move |conn| {
+        db::create_label(conn, &body.name, &body.colour)
     })
     .await
     {
-        Ok(Ok(label)) => (StatusCode::CREATED, Json(label)).into_response(),
-        Ok(Err(e)) => {
-            tracing::error!("DB error creating label: {e}");
-            StatusCode::INTERNAL_SERVER_ERROR.into_response()
-        }
-        Err(e) => {
-            tracing::error!("Task error creating label: {e}");
-            StatusCode::INTERNAL_SERVER_ERROR.into_response()
-        }
+        Ok(label) => (StatusCode::CREATED, Json(label)).into_response(),
+        Err(s) => s.into_response(),
     }
 }
 
@@ -337,16 +312,14 @@ async fn update_label(
     if !check_auth(&state, &headers) {
         return StatusCode::UNAUTHORIZED;
     }
-    let db = state.db.clone();
-    match tokio::task::spawn_blocking(move || {
-        let conn = db.lock().unwrap();
-        db::update_label(&conn, id, &body.name, &body.colour)
+    match db_op(state.db, move |conn| {
+        db::update_label(conn, id, &body.name, &body.colour)
     })
     .await
     {
-        Ok(Ok(0)) => StatusCode::NOT_FOUND,
-        Ok(Ok(_)) => StatusCode::NO_CONTENT,
-        _ => StatusCode::INTERNAL_SERVER_ERROR,
+        Ok(0) => StatusCode::NOT_FOUND,
+        Ok(_) => StatusCode::NO_CONTENT,
+        Err(s) => s,
     }
 }
 
@@ -358,16 +331,10 @@ async fn delete_label(
     if !check_auth(&state, &headers) {
         return StatusCode::UNAUTHORIZED;
     }
-    let db = state.db.clone();
-    match tokio::task::spawn_blocking(move || {
-        let conn = db.lock().unwrap();
-        db::delete_label(&conn, id)
-    })
-    .await
-    {
-        Ok(Ok(0)) => StatusCode::NOT_FOUND,
-        Ok(Ok(_)) => StatusCode::NO_CONTENT,
-        _ => StatusCode::INTERNAL_SERVER_ERROR,
+    match db_op(state.db, move |conn| db::delete_label(conn, id)).await {
+        Ok(0) => StatusCode::NOT_FOUND,
+        Ok(_) => StatusCode::NO_CONTENT,
+        Err(s) => s,
     }
 }
 
@@ -380,15 +347,13 @@ async fn add_station_label(
     if !check_auth(&state, &headers) {
         return StatusCode::UNAUTHORIZED;
     }
-    let db = state.db.clone();
-    match tokio::task::spawn_blocking(move || {
-        let conn = db.lock().unwrap();
-        db::add_station_label(&conn, &crs, body.label_id)
+    match db_op(state.db, move |conn| {
+        db::add_station_label(conn, &crs, body.label_id)
     })
     .await
     {
-        Ok(Ok(_)) => StatusCode::NO_CONTENT,
-        _ => StatusCode::INTERNAL_SERVER_ERROR,
+        Ok(_) => StatusCode::NO_CONTENT,
+        Err(s) => s,
     }
 }
 
@@ -400,16 +365,14 @@ async fn remove_station_label(
     if !check_auth(&state, &headers) {
         return StatusCode::UNAUTHORIZED;
     }
-    let db = state.db.clone();
-    match tokio::task::spawn_blocking(move || {
-        let conn = db.lock().unwrap();
-        db::remove_station_label(&conn, &crs, label_id)
+    match db_op(state.db, move |conn| {
+        db::remove_station_label(conn, &crs, label_id)
     })
     .await
     {
-        Ok(Ok(0)) => StatusCode::NOT_FOUND,
-        Ok(Ok(_)) => StatusCode::NO_CONTENT,
-        _ => StatusCode::INTERNAL_SERVER_ERROR,
+        Ok(0) => StatusCode::NOT_FOUND,
+        Ok(_) => StatusCode::NO_CONTENT,
+        Err(s) => s,
     }
 }
 
@@ -422,17 +385,10 @@ async fn update_station_status(
     if !check_auth(&state, &headers) {
         return StatusCode::UNAUTHORIZED;
     }
-    let db = state.db.clone();
     let status = body.status.as_str().to_string();
-
-    match tokio::task::spawn_blocking(move || {
-        let conn = db.lock().unwrap();
-        db::set_status(&conn, &crs, &status)
-    })
-    .await
-    {
-        Ok(Ok(0)) => StatusCode::NOT_FOUND,
-        Ok(Ok(_)) => StatusCode::NO_CONTENT,
-        _ => StatusCode::INTERNAL_SERVER_ERROR,
+    match db_op(state.db, move |conn| db::set_status(conn, &crs, &status)).await {
+        Ok(0) => StatusCode::NOT_FOUND,
+        Ok(_) => StatusCode::NO_CONTENT,
+        Err(s) => s,
     }
 }

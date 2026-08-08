@@ -178,6 +178,21 @@ export default function App() {
     return STATUS_COLOURS[s.status] ?? STATUS_COLOURS.unvisited;
   }
 
+  function patchStation(
+    predicate: (s: MarkerData) => boolean,
+    update: (s: MarkerData) => Partial<MarkerData>,
+  ) {
+    setStations((prev) =>
+      prev.map((s) => {
+        if (!predicate(s)) return s;
+        const updated = { ...s, ...update(s) };
+        const colour = computeColour(updated);
+        leafletMarkers.get(s.crs)?.setIcon(getIcon(colour));
+        return { ...updated, colour };
+      }),
+    );
+  }
+
   function authHeaders(): Record<string, string> {
     const token = authToken();
     const h: Record<string, string> = { "Content-Type": "application/json" };
@@ -199,15 +214,7 @@ export default function App() {
     }
 
     if (res.ok || res.status === 204) {
-      setStations((prev) =>
-        prev.map((s) => {
-          if (s.crs !== crs) return s;
-          const updated = { ...s, status };
-          const colour = computeColour(updated);
-          leafletMarkers.get(crs)?.setIcon(getIcon(colour));
-          return { ...updated, colour };
-        }),
-      );
+      patchStation((s) => s.crs === crs, () => ({ status }));
       return true;
     }
     return false;
@@ -219,30 +226,14 @@ export default function App() {
         method: "DELETE",
         headers: authHeaders(),
       });
-      setStations((prev) =>
-        prev.map((s) => {
-          if (s.crs !== crs) return s;
-          const updated = { ...s, labels: s.labels.filter((id) => id !== labelId) };
-          const colour = computeColour(updated);
-          leafletMarkers.get(crs)?.setIcon(getIcon(colour));
-          return { ...updated, colour };
-        }),
-      );
+      patchStation((s) => s.crs === crs, (s) => ({ labels: s.labels.filter((id) => id !== labelId) }));
     } else {
       await fetch(`/api/stations/${crs}/labels`, {
         method: "POST",
         headers: authHeaders(),
         body: JSON.stringify({ label_id: labelId }),
       });
-      setStations((prev) =>
-        prev.map((s) => {
-          if (s.crs !== crs) return s;
-          const updated = { ...s, labels: [...s.labels, labelId] };
-          const colour = computeColour(updated);
-          leafletMarkers.get(crs)?.setIcon(getIcon(colour));
-          return { ...updated, colour };
-        }),
-      );
+      patchStation((s) => s.crs === crs, (s) => ({ labels: [...s.labels, labelId] }));
     }
   }
 
@@ -261,15 +252,7 @@ export default function App() {
         setLabels((prev) =>
           prev.map((l) => (l.id === editId ? { ...l, name, colour: formColour() } : l)),
         );
-        // Recompute colours for stations that use this label
-        setStations((prev) =>
-          prev.map((s) => {
-            if (!s.labels.includes(editId)) return s;
-            const colour = computeColour(s);
-            leafletMarkers.get(s.crs)?.setIcon(getIcon(colour));
-            return { ...s, colour };
-          }),
-        );
+        patchStation((s) => s.labels.includes(editId), () => ({}));
       }
     } else {
       const res = await fetch("/api/labels", {
@@ -283,10 +266,7 @@ export default function App() {
       }
     }
 
-    setShowLabelForm(false);
-    setEditingLabelId(null);
-    setFormName("");
-    setFormColour("#3b82f6");
+    cancelLabelForm();
   }
 
   function startEditLabel(label: Label) {
@@ -296,11 +276,15 @@ export default function App() {
     setShowLabelForm(true);
   }
 
-  function cancelLabelForm() {
-    setShowLabelForm(false);
+  function resetLabelForm() {
     setEditingLabelId(null);
     setFormName("");
     setFormColour("#3b82f6");
+  }
+
+  function cancelLabelForm() {
+    resetLabelForm();
+    setShowLabelForm(false);
   }
 
   async function removeLabel(id: number) {
@@ -310,14 +294,9 @@ export default function App() {
     });
     if (res.ok || res.status === 204) {
       setLabels((prev) => prev.filter((l) => l.id !== id));
-      setStations((prev) =>
-        prev.map((s) => {
-          if (!s.labels.includes(id)) return s;
-          const updated = { ...s, labels: s.labels.filter((lid) => lid !== id) };
-          const colour = computeColour(updated);
-          leafletMarkers.get(s.crs)?.setIcon(getIcon(colour));
-          return { ...updated, colour };
-        }),
+      patchStation(
+        (s) => s.labels.includes(id),
+        (s) => ({ labels: s.labels.filter((lid) => lid !== id) }),
       );
       if (selectedLabel() === id) setSelectedLabel(null);
     }
@@ -362,12 +341,8 @@ export default function App() {
     setSyncing(true);
     setSyncResult(null);
 
-    const token = authToken();
-    const headers: Record<string, string> = {};
-    if (token) headers["Authorization"] = `Bearer ${token}`;
-
     try {
-      const res = await fetch("/api/stations/refresh", { method: "POST", headers });
+      const res = await fetch("/api/stations/refresh", { method: "POST", headers: authHeaders() });
       if (res.ok) {
         const s = (await res.json()) as SyncStats;
         setSyncResult(
@@ -473,9 +448,7 @@ export default function App() {
             <Show when={authed()}>
               <button
                 onClick={() => {
-                  setEditingLabelId(null);
-                  setFormName("");
-                  setFormColour("#3b82f6");
+                  resetLabelForm();
                   setShowLabelForm(true);
                 }}
                 style={{
