@@ -106,6 +106,7 @@ async fn main() {
 
     let frontend_dist =
         std::env::var("FRONTEND_DIST").unwrap_or_else(|_| "frontend/dist".to_string());
+    tracing::info!("Using path {} for Frontend", frontend_dist);
     let spa = ServeDir::new(&frontend_dist)
         .fallback(ServeFile::new(format!("{frontend_dist}/index.html")));
 
@@ -118,14 +119,12 @@ async fn main() {
         .route("/api/stations/refresh", post(station_refresh))
         .with_state(state)
         .fallback_service(spa);
+    let addr = std::env::var("ADDR").unwrap_or_else(|_| "0.0.0.0:3000".to_string());
+    let listener = tokio::net::TcpListener::bind(addr.clone())
+        .await
+        .expect("Failed to bind to port 3000");
 
-    let listener = tokio::net::TcpListener::bind(
-        std::env::var("ADDR").unwrap_or_else(|_| "0.0.0.0:3000".to_string()),
-    )
-    .await
-    .expect("Failed to bind to port 3000");
-
-    tracing::info!("Server running at http://localhost:3000");
+    tracing::info!("Server running at {}", addr);
     axum::serve(listener, app).await.expect("Server error");
 }
 
