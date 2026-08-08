@@ -2,6 +2,12 @@ import { createSignal, For, onCleanup, onMount, Show } from "solid-js";
 import L from "leaflet";
 import "leaflet/dist/leaflet.css";
 
+interface Label {
+  id: number;
+  name: string;
+  colour: string;
+}
+
 interface MarkerData {
   crs: string;
   lat: number;
@@ -10,6 +16,7 @@ interface MarkerData {
   name: string;
   operator_name: string;
   status: string;
+  labels: number[];
 }
 
 interface SyncStats {
@@ -124,19 +131,31 @@ export default function App() {
   const leafletMarkers = new Map<string, L.Marker>();
 
   const [stations, setStations] = createSignal<MarkerData[]>([]);
+  const [labels, setLabels] = createSignal<Label[]>([]);
   const [search, setSearch] = createSignal("");
+  const [selectedLabel, setSelectedLabel] = createSignal<number | null>(null);
   const [syncing, setSyncing] = createSignal(false);
   const [syncResult, setSyncResult] = createSignal<string | null>(null);
 
+  // Label form state
+  const [showLabelForm, setShowLabelForm] = createSignal(false);
+  const [editingLabelId, setEditingLabelId] = createSignal<number | null>(null);
+  const [formName, setFormName] = createSignal("");
+  const [formColour, setFormColour] = createSignal("#3b82f6");
+
   const filtered = () => {
     const q = search().toLowerCase().trim();
-    if (!q) return stations();
-    return stations().filter(
-      (s) =>
-        s.name.toLowerCase().includes(q) ||
-        s.crs.toLowerCase().includes(q) ||
-        s.operator_name.toLowerCase().includes(q),
-    );
+    const labelId = selectedLabel();
+    let result = stations();
+    if (q)
+      result = result.filter(
+        (s) =>
+          s.name.toLowerCase().includes(q) ||
+          s.crs.toLowerCase().includes(q) ||
+          s.operator_name.toLowerCase().includes(q),
+      );
+    if (labelId !== null) result = result.filter((s) => s.labels.includes(labelId));
+    return result;
   };
 
   const counts = () => {
@@ -146,14 +165,30 @@ export default function App() {
     return { total: all.length, done, visited, unvisited: all.length - done - visited };
   };
 
-  async function applyStatus(crs: string, status: string): Promise<boolean> {
-    const token = authToken();
-    const headers: Record<string, string> = { "Content-Type": "application/json" };
-    if (token) headers["Authorization"] = `Bearer ${token}`;
+  const labelStationCount = (labelId: number) =>
+    stations().filter((s) => s.labels.includes(labelId)).length;
 
+  // "done" takes priority; otherwise first label colour; otherwise status colour.
+  function computeColour(s: { status: string; labels: number[] }): string {
+    if (s.status === "done") return STATUS_COLOURS.done;
+    if (s.labels.length > 0) {
+      const label = labels().find((l) => l.id === s.labels[0]);
+      if (label) return label.colour;
+    }
+    return STATUS_COLOURS[s.status] ?? STATUS_COLOURS.unvisited;
+  }
+
+  function authHeaders(): Record<string, string> {
+    const token = authToken();
+    const h: Record<string, string> = { "Content-Type": "application/json" };
+    if (token) h["Authorization"] = `Bearer ${token}`;
+    return h;
+  }
+
+  async function applyStatus(crs: string, status: string): Promise<boolean> {
     const res = await fetch(`/api/stations/${crs}/status`, {
       method: "PATCH",
-      headers,
+      headers: authHeaders(),
       body: JSON.stringify({ status }),
     });
 
@@ -164,17 +199,128 @@ export default function App() {
     }
 
     if (res.ok || res.status === 204) {
-      const colour = STATUS_COLOURS[status] ?? STATUS_COLOURS.unvisited;
       setStations((prev) =>
         prev.map((s) => {
           if (s.crs !== crs) return s;
+          const updated = { ...s, status };
+          const colour = computeColour(updated);
           leafletMarkers.get(crs)?.setIcon(getIcon(colour));
-          return { ...s, status, colour };
+          return { ...updated, colour };
         }),
       );
       return true;
     }
     return false;
+  }
+
+  async function toggleStationLabel(crs: string, labelId: number, assigned: boolean) {
+    if (assigned) {
+      await fetch(`/api/stations/${crs}/labels/${labelId}`, {
+        method: "DELETE",
+        headers: authHeaders(),
+      });
+      setStations((prev) =>
+        prev.map((s) => {
+          if (s.crs !== crs) return s;
+          const updated = { ...s, labels: s.labels.filter((id) => id !== labelId) };
+          const colour = computeColour(updated);
+          leafletMarkers.get(crs)?.setIcon(getIcon(colour));
+          return { ...updated, colour };
+        }),
+      );
+    } else {
+      await fetch(`/api/stations/${crs}/labels`, {
+        method: "POST",
+        headers: authHeaders(),
+        body: JSON.stringify({ label_id: labelId }),
+      });
+      setStations((prev) =>
+        prev.map((s) => {
+          if (s.crs !== crs) return s;
+          const updated = { ...s, labels: [...s.labels, labelId] };
+          const colour = computeColour(updated);
+          leafletMarkers.get(crs)?.setIcon(getIcon(colour));
+          return { ...updated, colour };
+        }),
+      );
+    }
+  }
+
+  async function saveLabel() {
+    const name = formName().trim();
+    if (!name) return;
+    const editId = editingLabelId();
+
+    if (editId !== null) {
+      const res = await fetch(`/api/labels/${editId}`, {
+        method: "PUT",
+        headers: authHeaders(),
+        body: JSON.stringify({ name, colour: formColour() }),
+      });
+      if (res.ok || res.status === 204) {
+        setLabels((prev) =>
+          prev.map((l) => (l.id === editId ? { ...l, name, colour: formColour() } : l)),
+        );
+        // Recompute colours for stations that use this label
+        setStations((prev) =>
+          prev.map((s) => {
+            if (!s.labels.includes(editId)) return s;
+            const colour = computeColour(s);
+            leafletMarkers.get(s.crs)?.setIcon(getIcon(colour));
+            return { ...s, colour };
+          }),
+        );
+      }
+    } else {
+      const res = await fetch("/api/labels", {
+        method: "POST",
+        headers: authHeaders(),
+        body: JSON.stringify({ name, colour: formColour() }),
+      });
+      if (res.ok) {
+        const created: Label = await res.json();
+        setLabels((prev) => [...prev, created].sort((a, b) => a.name.localeCompare(b.name)));
+      }
+    }
+
+    setShowLabelForm(false);
+    setEditingLabelId(null);
+    setFormName("");
+    setFormColour("#3b82f6");
+  }
+
+  function startEditLabel(label: Label) {
+    setEditingLabelId(label.id);
+    setFormName(label.name);
+    setFormColour(label.colour);
+    setShowLabelForm(true);
+  }
+
+  function cancelLabelForm() {
+    setShowLabelForm(false);
+    setEditingLabelId(null);
+    setFormName("");
+    setFormColour("#3b82f6");
+  }
+
+  async function removeLabel(id: number) {
+    const res = await fetch(`/api/labels/${id}`, {
+      method: "DELETE",
+      headers: authHeaders(),
+    });
+    if (res.ok || res.status === 204) {
+      setLabels((prev) => prev.filter((l) => l.id !== id));
+      setStations((prev) =>
+        prev.map((s) => {
+          if (!s.labels.includes(id)) return s;
+          const updated = { ...s, labels: s.labels.filter((lid) => lid !== id) };
+          const colour = computeColour(updated);
+          leafletMarkers.get(s.crs)?.setIcon(getIcon(colour));
+          return { ...updated, colour };
+        }),
+      );
+      if (selectedLabel() === id) setSelectedLabel(null);
+    }
   }
 
   // Attach a Leaflet marker for one station and register it in leafletMarkers.
@@ -207,8 +353,9 @@ export default function App() {
     leafletMarkers.forEach((m) => m.remove());
     leafletMarkers.clear();
     const data: MarkerData[] = await fetch("/api/markers").then((r) => r.json());
-    setStations(data);
-    for (const m of data) addMarker(m);
+    const withColour = data.map((s) => ({ ...s, colour: computeColour(s) }));
+    setStations(withColour);
+    for (const m of withColour) addMarker(m);
   }
 
   async function triggerSync() {
@@ -276,35 +423,316 @@ export default function App() {
       maxZoom: 19,
     }).addTo(map);
 
-    const data: MarkerData[] = await fetch("/api/markers").then((r) => r.json());
-    setStations(data);
-    for (const m of data) addMarker(m);
+    const [markersData, labelsData] = await Promise.all([
+      fetch("/api/markers").then((r) => r.json()) as Promise<MarkerData[]>,
+      fetch("/api/labels").then((r) => r.json()) as Promise<Label[]>,
+    ]);
+
+    // Set labels first so computeColour has the data it needs.
+    setLabels(labelsData);
+    const stationsWithColour = markersData.map((s) => ({
+      ...s,
+      colour: computeColour(s),
+    }));
+    setStations(stationsWithColour);
+    for (const m of stationsWithColour) addMarker(m);
   });
 
   onCleanup(() => map?.remove());
+
+  const panelStyle = {
+    position: "fixed" as const,
+    top: "10px",
+    "max-height": "calc(100vh - 20px)",
+    background: "white",
+    "border-radius": "8px",
+    "box-shadow": "0 2px 16px rgba(0,0,0,0.35)",
+    display: "flex",
+    "flex-direction": "column" as const,
+    "z-index": "1000",
+    overflow: "hidden",
+    "font-family": "sans-serif",
+  };
 
   return (
     <>
       <div ref={container} style={{ position: "fixed", inset: "0" }} />
 
-      {/* Side panel */}
-      <div
-        style={{
-          position: "fixed",
-          top: "10px",
-          right: "10px",
-          width: "300px",
-          "max-height": "calc(100vh - 20px)",
-          background: "white",
-          "border-radius": "8px",
-          "box-shadow": "0 2px 16px rgba(0,0,0,0.35)",
-          display: "flex",
-          "flex-direction": "column",
-          "z-index": "1000",
-          overflow: "hidden",
-          "font-family": "sans-serif",
-        }}
-      >
+      {/* Labels pane — left */}
+      <div style={{ ...panelStyle, left: "10px", width: "240px" }}>
+        <div style={{ padding: "12px 14px 8px", "border-bottom": "1px solid #eee" }}>
+          <div
+            style={{
+              display: "flex",
+              "justify-content": "space-between",
+              "align-items": "center",
+              "margin-bottom": showLabelForm() ? "10px" : "0",
+            }}
+          >
+            <strong style={{ "font-size": "14px" }}>Labels</strong>
+            <Show when={authed()}>
+              <button
+                onClick={() => {
+                  setEditingLabelId(null);
+                  setFormName("");
+                  setFormColour("#3b82f6");
+                  setShowLabelForm(true);
+                }}
+                style={{
+                  padding: "3px 10px",
+                  background: "#2563eb",
+                  color: "white",
+                  border: "none",
+                  "border-radius": "4px",
+                  cursor: "pointer",
+                  "font-size": "11px",
+                  "font-weight": "600",
+                  "font-family": "sans-serif",
+                }}
+              >
+                + New
+              </button>
+            </Show>
+          </div>
+
+          {/* Label form */}
+          <Show when={showLabelForm()}>
+            <div
+              style={{
+                background: "#f8fafc",
+                border: "1px solid #e2e8f0",
+                "border-radius": "6px",
+                padding: "10px",
+                display: "flex",
+                "flex-direction": "column",
+                gap: "8px",
+              }}
+            >
+              <input
+                type="text"
+                placeholder="Label name"
+                value={formName()}
+                onInput={(e) => setFormName(e.currentTarget.value)}
+                style={{
+                  width: "100%",
+                  "box-sizing": "border-box",
+                  padding: "5px 8px",
+                  border: "1px solid #ddd",
+                  "border-radius": "4px",
+                  "font-size": "12px",
+                  outline: "none",
+                }}
+              />
+              <div style={{ display: "flex", "align-items": "center", gap: "8px" }}>
+                <label style={{ "font-size": "11px", color: "#666" }}>Colour</label>
+                <input
+                  type="color"
+                  value={formColour()}
+                  onInput={(e) => setFormColour(e.currentTarget.value)}
+                  style={{
+                    width: "36px",
+                    height: "24px",
+                    border: "1px solid #ddd",
+                    "border-radius": "4px",
+                    cursor: "pointer",
+                    padding: "1px",
+                  }}
+                />
+                <span
+                  style={{
+                    "font-size": "11px",
+                    color: "#666",
+                    flex: "1",
+                    "font-family": "monospace",
+                  }}
+                >
+                  {formColour()}
+                </span>
+              </div>
+              <div style={{ display: "flex", gap: "6px" }}>
+                <button
+                  onClick={saveLabel}
+                  style={{
+                    flex: "1",
+                    padding: "5px",
+                    background: "#2563eb",
+                    color: "white",
+                    border: "none",
+                    "border-radius": "4px",
+                    cursor: "pointer",
+                    "font-size": "11px",
+                    "font-weight": "600",
+                    "font-family": "sans-serif",
+                  }}
+                >
+                  {editingLabelId() !== null ? "Update" : "Create"}
+                </button>
+                <button
+                  onClick={cancelLabelForm}
+                  style={{
+                    flex: "1",
+                    padding: "5px",
+                    background: "#f1f5f9",
+                    color: "#444",
+                    border: "1px solid #e2e8f0",
+                    "border-radius": "4px",
+                    cursor: "pointer",
+                    "font-size": "11px",
+                    "font-family": "sans-serif",
+                  }}
+                >
+                  Cancel
+                </button>
+              </div>
+            </div>
+          </Show>
+        </div>
+
+        {/* Label list */}
+        <div style={{ "overflow-y": "auto", flex: "1" }}>
+          <Show
+            when={labels().length > 0}
+            fallback={
+              <div
+                style={{
+                  padding: "16px 14px",
+                  "font-size": "12px",
+                  color: "#aaa",
+                  "text-align": "center",
+                }}
+              >
+                No labels yet
+              </div>
+            }
+          >
+            <Show when={selectedLabel() !== null}>
+              <div
+                style={{
+                  padding: "6px 14px",
+                  "border-bottom": "1px solid #f0f0f0",
+                }}
+              >
+                <button
+                  onClick={() => setSelectedLabel(null)}
+                  style={{
+                    width: "100%",
+                    padding: "4px 8px",
+                    background: "#f1f5f9",
+                    border: "1px solid #e2e8f0",
+                    "border-radius": "4px",
+                    cursor: "pointer",
+                    "font-size": "11px",
+                    color: "#555",
+                    "font-family": "sans-serif",
+                  }}
+                >
+                  × Show all stations
+                </button>
+              </div>
+            </Show>
+            <For each={labels()}>
+              {(label) => {
+                const isSelected = () => selectedLabel() === label.id;
+                const count = () => labelStationCount(label.id);
+                return (
+                  <div
+                    style={{
+                      padding: "8px 14px",
+                      "border-bottom": "1px solid #f0f0f0",
+                      background: isSelected() ? "#eff6ff" : "transparent",
+                      cursor: "pointer",
+                    }}
+                    onClick={() =>
+                      setSelectedLabel(isSelected() ? null : label.id)
+                    }
+                  >
+                    <div
+                      style={{
+                        display: "flex",
+                        "align-items": "center",
+                        gap: "8px",
+                      }}
+                    >
+                      <span
+                        style={{
+                          width: "12px",
+                          height: "12px",
+                          "border-radius": "50%",
+                          "background-color": label.colour,
+                          border: "1.5px solid rgba(0,0,0,0.2)",
+                          "flex-shrink": "0",
+                          display: "inline-block",
+                        }}
+                      />
+                      <span
+                        style={{
+                          "font-size": "13px",
+                          "font-weight": isSelected() ? "700" : "500",
+                          flex: "1",
+                        }}
+                      >
+                        {label.name}
+                      </span>
+                      <span
+                        style={{
+                          "font-size": "10px",
+                          color: "#888",
+                          background: "#f0f0f0",
+                          padding: "1px 5px",
+                          "border-radius": "8px",
+                        }}
+                      >
+                        {count()}
+                      </span>
+                      <Show when={authed()}>
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            startEditLabel(label);
+                          }}
+                          style={{
+                            background: "none",
+                            border: "none",
+                            cursor: "pointer",
+                            color: "#888",
+                            "font-size": "12px",
+                            padding: "0 2px",
+                            "line-height": "1",
+                          }}
+                          title="Edit label"
+                        >
+                          ✎
+                        </button>
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            removeLabel(label.id);
+                          }}
+                          style={{
+                            background: "none",
+                            border: "none",
+                            cursor: "pointer",
+                            color: "#e05",
+                            "font-size": "13px",
+                            padding: "0 2px",
+                            "line-height": "1",
+                          }}
+                          title="Delete label"
+                        >
+                          ×
+                        </button>
+                      </Show>
+                    </div>
+                  </div>
+                );
+              }}
+            </For>
+          </Show>
+        </div>
+      </div>
+
+      {/* Stations pane — right */}
+      <div style={{ ...panelStyle, right: "10px", width: "300px" }}>
         {/* Header */}
         <div style={{ padding: "12px 14px 8px", "border-bottom": "1px solid #eee" }}>
           <div
@@ -444,11 +872,73 @@ export default function App() {
                     "font-size": "11px",
                     color: "#888",
                     "padding-left": "17px",
-                    "margin-bottom": authed() ? "6px" : "0",
+                    "margin-bottom": "4px",
                   }}
                 >
                   {s.operator_name} · {s.crs}
                 </div>
+
+                {/* Labels: toggles when authed, read-only pills otherwise */}
+                <Show when={labels().length > 0}>
+                  <div
+                    style={{
+                      display: "flex",
+                      gap: "4px",
+                      "padding-left": "17px",
+                      "flex-wrap": "wrap",
+                      "margin-bottom": "4px",
+                    }}
+                  >
+                    <For each={labels()}>
+                      {(label) => {
+                        const assigned = () => s.labels.includes(label.id);
+                        return (
+                          <Show when={authed() || assigned()}>
+                            <button
+                              onClick={() => authed() && toggleStationLabel(s.crs, label.id, assigned())}
+                              style={{
+                                display: "inline-flex",
+                                "align-items": "center",
+                                gap: "3px",
+                                padding: "2px 6px",
+                                border: assigned()
+                                  ? `1.5px solid ${label.colour}`
+                                  : "1.5px solid #ddd",
+                                "border-radius": "8px",
+                                cursor: authed() ? "pointer" : "default",
+                                background: assigned() ? label.colour + "22" : "transparent",
+                                "font-size": "10px",
+                                color: "#333",
+                                opacity: assigned() ? "1" : "0.4",
+                                transition: "opacity 0.15s",
+                                "font-family": "sans-serif",
+                              }}
+                              title={
+                                authed()
+                                  ? assigned()
+                                    ? `Remove "${label.name}"`
+                                    : `Add "${label.name}"`
+                                  : label.name
+                              }
+                            >
+                              <span
+                                style={{
+                                  width: "7px",
+                                  height: "7px",
+                                  "border-radius": "50%",
+                                  "background-color": label.colour,
+                                  display: "inline-block",
+                                  "flex-shrink": "0",
+                                }}
+                              />
+                              {label.name}
+                            </button>
+                          </Show>
+                        );
+                      }}
+                    </For>
+                  </div>
+                </Show>
 
                 <Show when={authed()}>
                   <div style={{ display: "flex", gap: "4px", "padding-left": "17px" }}>

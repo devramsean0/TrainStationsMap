@@ -11,6 +11,16 @@ pub fn init(conn: &Connection) -> Result<()> {
             operator_code TEXT NOT NULL,
             operator_name TEXT NOT NULL,
             status        TEXT NOT NULL DEFAULT 'unvisited'
+        );
+        CREATE TABLE IF NOT EXISTS labels (
+            id     INTEGER PRIMARY KEY AUTOINCREMENT,
+            name   TEXT NOT NULL,
+            colour TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS station_labels (
+            station_crs TEXT NOT NULL REFERENCES stations(crs_code),
+            label_id    INTEGER NOT NULL REFERENCES labels(id),
+            PRIMARY KEY (station_crs, label_id)
         );",
     )
 }
@@ -57,17 +67,30 @@ pub struct MarkerRow {
     pub name: String,
     pub operator_name: String,
     pub status: String,
+    pub labels: Vec<i64>,
 }
 
 pub fn get_markers(conn: &Connection) -> Result<Vec<MarkerRow>> {
     let mut stmt = conn.prepare(
-        "SELECT crs_code, name, lat, lng, operator_name, status
-         FROM stations
-         ORDER BY name",
+        "SELECT s.crs_code, s.name, s.lat, s.lng, s.operator_name, s.status,
+                COALESCE(GROUP_CONCAT(sl.label_id), '') AS label_ids
+         FROM stations s
+         LEFT JOIN station_labels sl ON sl.station_crs = s.crs_code
+         GROUP BY s.crs_code
+         ORDER BY s.name",
     )?;
     let rows = stmt
         .query_map([], |row| {
             let status: String = row.get(5)?;
+            let label_ids_str: String = row.get(6)?;
+            let labels: Vec<i64> = if label_ids_str.is_empty() {
+                vec![]
+            } else {
+                label_ids_str
+                    .split(',')
+                    .filter_map(|s| s.parse().ok())
+                    .collect()
+            };
             Ok(MarkerRow {
                 crs: row.get(0)?,
                 name: row.get(1)?,
@@ -76,6 +99,7 @@ pub fn get_markers(conn: &Connection) -> Result<Vec<MarkerRow>> {
                 operator_name: row.get(4)?,
                 colour: status_colour(&status).to_string(),
                 status,
+                labels,
             })
         })?
         .collect::<Result<Vec<_>>>()?;
@@ -95,6 +119,68 @@ pub fn status_colour(status: &str) -> &'static str {
         "done" => "#40c040",
         _ => "#4080f0",
     }
+}
+
+#[derive(Serialize)]
+pub struct LabelRow {
+    pub id: i64,
+    pub name: String,
+    pub colour: String,
+}
+
+pub fn get_labels(conn: &Connection) -> Result<Vec<LabelRow>> {
+    let mut stmt = conn.prepare("SELECT id, name, colour FROM labels ORDER BY name")?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok(LabelRow {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                colour: row.get(2)?,
+            })
+        })?
+        .collect::<Result<Vec<_>>>()?;
+    Ok(rows)
+}
+
+pub fn create_label(conn: &Connection, name: &str, colour: &str) -> Result<LabelRow> {
+    conn.execute(
+        "INSERT INTO labels (name, colour) VALUES (?1, ?2)",
+        params![name, colour],
+    )?;
+    Ok(LabelRow {
+        id: conn.last_insert_rowid(),
+        name: name.to_string(),
+        colour: colour.to_string(),
+    })
+}
+
+pub fn update_label(conn: &Connection, id: i64, name: &str, colour: &str) -> Result<usize> {
+    conn.execute(
+        "UPDATE labels SET name = ?1, colour = ?2 WHERE id = ?3",
+        params![name, colour, id],
+    )
+}
+
+pub fn delete_label(conn: &Connection, id: i64) -> Result<usize> {
+    conn.execute(
+        "DELETE FROM station_labels WHERE label_id = ?1",
+        params![id],
+    )?;
+    conn.execute("DELETE FROM labels WHERE id = ?1", params![id])
+}
+
+pub fn add_station_label(conn: &Connection, crs: &str, label_id: i64) -> Result<usize> {
+    conn.execute(
+        "INSERT OR IGNORE INTO station_labels (station_crs, label_id) VALUES (?1, ?2)",
+        params![crs.to_uppercase(), label_id],
+    )
+}
+
+pub fn remove_station_label(conn: &Connection, crs: &str, label_id: i64) -> Result<usize> {
+    conn.execute(
+        "DELETE FROM station_labels WHERE station_crs = ?1 AND label_id = ?2",
+        params![crs.to_uppercase(), label_id],
+    )
 }
 
 #[derive(Default, Serialize)]

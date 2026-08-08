@@ -7,7 +7,7 @@ use axum::{
     extract::{Path, State},
     http::{header, HeaderMap, StatusCode},
     response::{IntoResponse, Json, Response},
-    routing::{get, patch, post},
+    routing::{delete, get, patch, post, put},
     Router,
 };
 use reqwest::Client;
@@ -34,6 +34,17 @@ struct LoginRequest {
 #[derive(Deserialize)]
 struct StatusUpdate {
     status: StationStatus,
+}
+
+#[derive(Deserialize)]
+struct LabelBody {
+    name: String,
+    colour: String,
+}
+
+#[derive(Deserialize)]
+struct AssignLabelBody {
+    label_id: i64,
 }
 
 #[derive(Deserialize)]
@@ -117,6 +128,13 @@ async fn main() {
         .route("/api/auth/login", post(login))
         .route("/api/auth/verify", get(verify_auth))
         .route("/api/stations/refresh", post(station_refresh))
+        .route("/api/labels", get(list_labels).post(create_label))
+        .route("/api/labels/:id", put(update_label).delete(delete_label))
+        .route("/api/stations/:crs/labels", post(add_station_label))
+        .route(
+            "/api/stations/:crs/labels/:label_id",
+            delete(remove_station_label),
+        )
         .with_state(state)
         .fallback_service(spa);
     let addr = std::env::var("ADDR").unwrap_or_else(|_| "0.0.0.0:3000".to_string());
@@ -260,6 +278,138 @@ async fn list_markers(State(state): State<AppState>) -> Response {
             tracing::error!("Task error listing markers: {e}");
             StatusCode::INTERNAL_SERVER_ERROR.into_response()
         }
+    }
+}
+
+async fn list_labels(State(state): State<AppState>) -> Response {
+    let db = state.db.clone();
+    match tokio::task::spawn_blocking(move || {
+        let conn = db.lock().unwrap();
+        db::get_labels(&conn)
+    })
+    .await
+    {
+        Ok(Ok(labels)) => Json(labels).into_response(),
+        Ok(Err(e)) => {
+            tracing::error!("DB error listing labels: {e}");
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
+        Err(e) => {
+            tracing::error!("Task error listing labels: {e}");
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
+    }
+}
+
+async fn create_label(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<LabelBody>,
+) -> Response {
+    if !check_auth(&state, &headers) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    let db = state.db.clone();
+    match tokio::task::spawn_blocking(move || {
+        let conn = db.lock().unwrap();
+        db::create_label(&conn, &body.name, &body.colour)
+    })
+    .await
+    {
+        Ok(Ok(label)) => (StatusCode::CREATED, Json(label)).into_response(),
+        Ok(Err(e)) => {
+            tracing::error!("DB error creating label: {e}");
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
+        Err(e) => {
+            tracing::error!("Task error creating label: {e}");
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
+    }
+}
+
+async fn update_label(
+    Path(id): Path<i64>,
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<LabelBody>,
+) -> StatusCode {
+    if !check_auth(&state, &headers) {
+        return StatusCode::UNAUTHORIZED;
+    }
+    let db = state.db.clone();
+    match tokio::task::spawn_blocking(move || {
+        let conn = db.lock().unwrap();
+        db::update_label(&conn, id, &body.name, &body.colour)
+    })
+    .await
+    {
+        Ok(Ok(0)) => StatusCode::NOT_FOUND,
+        Ok(Ok(_)) => StatusCode::NO_CONTENT,
+        _ => StatusCode::INTERNAL_SERVER_ERROR,
+    }
+}
+
+async fn delete_label(
+    Path(id): Path<i64>,
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> StatusCode {
+    if !check_auth(&state, &headers) {
+        return StatusCode::UNAUTHORIZED;
+    }
+    let db = state.db.clone();
+    match tokio::task::spawn_blocking(move || {
+        let conn = db.lock().unwrap();
+        db::delete_label(&conn, id)
+    })
+    .await
+    {
+        Ok(Ok(0)) => StatusCode::NOT_FOUND,
+        Ok(Ok(_)) => StatusCode::NO_CONTENT,
+        _ => StatusCode::INTERNAL_SERVER_ERROR,
+    }
+}
+
+async fn add_station_label(
+    Path(crs): Path<String>,
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<AssignLabelBody>,
+) -> StatusCode {
+    if !check_auth(&state, &headers) {
+        return StatusCode::UNAUTHORIZED;
+    }
+    let db = state.db.clone();
+    match tokio::task::spawn_blocking(move || {
+        let conn = db.lock().unwrap();
+        db::add_station_label(&conn, &crs, body.label_id)
+    })
+    .await
+    {
+        Ok(Ok(_)) => StatusCode::NO_CONTENT,
+        _ => StatusCode::INTERNAL_SERVER_ERROR,
+    }
+}
+
+async fn remove_station_label(
+    Path((crs, label_id)): Path<(String, i64)>,
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> StatusCode {
+    if !check_auth(&state, &headers) {
+        return StatusCode::UNAUTHORIZED;
+    }
+    let db = state.db.clone();
+    match tokio::task::spawn_blocking(move || {
+        let conn = db.lock().unwrap();
+        db::remove_station_label(&conn, &crs, label_id)
+    })
+    .await
+    {
+        Ok(Ok(0)) => StatusCode::NOT_FOUND,
+        Ok(Ok(_)) => StatusCode::NO_CONTENT,
+        _ => StatusCode::INTERNAL_SERVER_ERROR,
     }
 }
 
