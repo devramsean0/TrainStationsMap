@@ -1,4 +1,4 @@
-import { createMemo, createSignal, For, onCleanup, onMount, Show } from "solid-js";
+import { createEffect, createMemo, createSignal, For, onCleanup, onMount, Show } from "solid-js";
 import L from "leaflet";
 import "leaflet/dist/leaflet.css";
 
@@ -387,7 +387,6 @@ export default function App() {
     setLabels(labelsData);
     const withColour = markersData.map((s) => ({ ...s, colour: computeColour(s) }));
     setStations(withColour);
-    rebuildMarkers(withColour);
     cacheSet(STATIONS_CACHE_KEY, markersData);
     cacheSet(LABELS_CACHE_KEY, labelsData);
   }
@@ -465,6 +464,11 @@ export default function App() {
       maxZoom: 19,
     }).addTo(map);
 
+    // Keep the map markers in sync with the same search/label filter as the
+    // sidebar list — previously markers were only ever rebuilt from the full
+    // station list, so filtering never actually hid anything on the map.
+    createEffect(() => rebuildMarkers(filtered()));
+
     // Render instantly from last-seen data (if any) so markers don't wait on
     // the network; the fetch below replaces it with fresh data + re-caches.
     const cachedStations = cacheGet<MarkerData[]>(STATIONS_CACHE_KEY);
@@ -473,7 +477,6 @@ export default function App() {
       setLabels(cachedLabels);
       const withColour = cachedStations.map((s) => ({ ...s, colour: computeColour(s) }));
       setStations(withColour);
-      rebuildMarkers(withColour);
     }
 
     // Surface an OIDC login failure passed back via the callback redirect, then
