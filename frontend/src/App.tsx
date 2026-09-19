@@ -1,4 +1,4 @@
-import { createSignal, For, onCleanup, onMount, Show } from "solid-js";
+import { createMemo, createSignal, For, onCleanup, onMount, Show } from "solid-js";
 import L from "leaflet";
 import "leaflet/dist/leaflet.css";
 
@@ -36,6 +36,26 @@ const STATUS_LABELS: Record<string, string> = {
   visited: "Visited",
   done: "Done",
 };
+
+const STATIONS_CACHE_KEY = "cachedStations";
+const LABELS_CACHE_KEY = "cachedLabels";
+
+function cacheGet<T>(key: string): T | null {
+  try {
+    const raw = localStorage.getItem(key);
+    return raw ? (JSON.parse(raw) as T) : null;
+  } catch {
+    return null;
+  }
+}
+
+function cacheSet(key: string, value: unknown) {
+  try {
+    localStorage.setItem(key, JSON.stringify(value));
+  } catch {
+    // storage full/unavailable — caching is a pure optimization, safe to skip
+  }
+}
 
 const iconCache: Record<string, L.DivIcon> = {};
 
@@ -143,7 +163,9 @@ export default function App() {
   const [formName, setFormName] = createSignal("");
   const [formColour, setFormColour] = createSignal("#3b82f6");
 
-  const filtered = () => {
+  // Memoized so repeated reads within the same render (header count + list) don't
+  // re-filter/re-scan the full station list each time — only recomputes on real changes.
+  const filtered = createMemo(() => {
     const q = search().toLowerCase().trim();
     const labelId = selectedLabel();
     let result = stations();
@@ -156,23 +178,36 @@ export default function App() {
       );
     if (labelId !== null) result = result.filter((s) => s.labels.includes(labelId));
     return result;
-  };
+  });
 
-  const counts = () => {
+  const counts = createMemo(() => {
     const all = stations();
     const done = all.filter((s) => s.status === "done").length;
     const visited = all.filter((s) => s.status === "visited").length;
     return { total: all.length, done, visited, unvisited: all.length - done - visited };
-  };
+  });
 
-  const labelStationCount = (labelId: number) =>
-    stations().filter((s) => s.labels.includes(labelId)).length;
+  const labelsById = createMemo(() => {
+    const map = new Map<number, Label>();
+    for (const l of labels()) map.set(l.id, l);
+    return map;
+  });
+
+  // One pass over stations instead of re-filtering per label on every render.
+  const labelCounts = createMemo(() => {
+    const counts = new Map<number, number>();
+    for (const s of stations())
+      for (const id of s.labels) counts.set(id, (counts.get(id) ?? 0) + 1);
+    return counts;
+  });
+
+  const labelStationCount = (labelId: number) => labelCounts().get(labelId) ?? 0;
 
   // "done" takes priority; otherwise first label colour; otherwise status colour.
   function computeColour(s: { status: string; labels: number[] }): string {
     if (s.status === "done") return STATUS_COLOURS.done;
     if (s.labels.length > 0) {
-      const label = labels().find((l) => l.id === s.labels[0]);
+      const label = labelsById().get(s.labels[0]);
       if (label) return label.colour;
     }
     return STATUS_COLOURS[s.status] ?? STATUS_COLOURS.unvisited;
@@ -327,14 +362,51 @@ export default function App() {
     leafletMarkers.set(m.crs, marker);
   }
 
-  // Tear down all markers and rebuild from /api/markers.
-  async function reloadMarkers() {
+  // Tear down all markers and rebuild from a fresh station list.
+  function rebuildMarkers(list: MarkerData[]) {
     leafletMarkers.forEach((m) => m.remove());
     leafletMarkers.clear();
-    const data: MarkerData[] = await fetch("/api/markers").then((r) => r.json());
-    const withColour = data.map((s) => ({ ...s, colour: computeColour(s) }));
+    for (const m of list) addMarker(m);
+  }
+
+  function applyData(markersData: MarkerData[], labelsData: Label[]) {
+    setLabels(labelsData);
+    const withColour = markersData.map((s) => ({ ...s, colour: computeColour(s) }));
     setStations(withColour);
-    for (const m of withColour) addMarker(m);
+    rebuildMarkers(withColour);
+    cacheSet(STATIONS_CACHE_KEY, markersData);
+    cacheSet(LABELS_CACHE_KEY, labelsData);
+  }
+
+  // Fetch the latest stations/labels from the server and apply + cache them.
+  async function fetchAndApplyData() {
+    const [markersData, labelsData] = await Promise.all([
+      fetch("/api/markers").then((r) => r.json()) as Promise<MarkerData[]>,
+      fetch("/api/labels").then((r) => r.json()) as Promise<Label[]>,
+    ]);
+    applyData(markersData, labelsData);
+  }
+
+  // The server ignores the Authorization header entirely when no password is
+  // configured (always 204), and can only 401 when one is — so a single call,
+  // sent with whatever token we have, is enough to resolve both authRequired
+  // and authed. No need for a separate no-credentials probe first.
+  async function verifyAuth() {
+    const stored = sessionStorage.getItem("authToken");
+    const res = await fetch(
+      "/api/auth/verify",
+      stored ? { headers: { Authorization: `Bearer ${stored}` } } : undefined,
+    );
+    if (res.ok) {
+      setAuthRequired(!!stored);
+      if (stored) setAuthToken(stored);
+      setAuthed(true);
+    } else {
+      // A 401 only happens when a password is configured, so auth is required.
+      setAuthRequired(true);
+      setAuthed(false);
+      sessionStorage.removeItem("authToken");
+    }
   }
 
   async function triggerSync() {
@@ -348,7 +420,7 @@ export default function App() {
         setSyncResult(
           `Sync complete — ${s.inserted} new, ${s.updated} updated, ${s.crs_changed} renamed`,
         );
-        await reloadMarkers();
+        await fetchAndApplyData();
       } else if (res.status === 503) {
         setSyncResult("Server error: RDM API keys not configured");
       } else {
@@ -368,28 +440,7 @@ export default function App() {
     map.flyTo([s.lat, s.lng], 14);
   }
 
-  onMount(async () => {
-    // Determine whether auth is required, then validate any stored token.
-    const noCredRes = await fetch("/api/auth/verify");
-    if (noCredRes.ok) {
-      setAuthRequired(false);
-      setAuthed(true);
-    } else {
-      setAuthRequired(true);
-      const stored = sessionStorage.getItem("authToken");
-      if (stored) {
-        const tokenRes = await fetch("/api/auth/verify", {
-          headers: { Authorization: `Bearer ${stored}` },
-        });
-        if (tokenRes.ok) {
-          setAuthToken(stored);
-          setAuthed(true);
-        } else {
-          sessionStorage.removeItem("authToken");
-        }
-      }
-    }
-
+  onMount(() => {
     map = L.map(container!).setView([54.5, -3.5], 6);
 
     L.tileLayer("/api/tiles/{z}/{x}/{y}", {
@@ -398,19 +449,20 @@ export default function App() {
       maxZoom: 19,
     }).addTo(map);
 
-    const [markersData, labelsData] = await Promise.all([
-      fetch("/api/markers").then((r) => r.json()) as Promise<MarkerData[]>,
-      fetch("/api/labels").then((r) => r.json()) as Promise<Label[]>,
-    ]);
+    // Render instantly from last-seen data (if any) so markers don't wait on
+    // the network; the fetch below replaces it with fresh data + re-caches.
+    const cachedStations = cacheGet<MarkerData[]>(STATIONS_CACHE_KEY);
+    const cachedLabels = cacheGet<Label[]>(LABELS_CACHE_KEY);
+    if (cachedStations && cachedLabels) {
+      setLabels(cachedLabels);
+      const withColour = cachedStations.map((s) => ({ ...s, colour: computeColour(s) }));
+      setStations(withColour);
+      rebuildMarkers(withColour);
+    }
 
-    // Set labels first so computeColour has the data it needs.
-    setLabels(labelsData);
-    const stationsWithColour = markersData.map((s) => ({
-      ...s,
-      colour: computeColour(s),
-    }));
-    setStations(stationsWithColour);
-    for (const m of stationsWithColour) addMarker(m);
+    // Auth check and data fetch run concurrently — neither blocks the other.
+    verifyAuth();
+    fetchAndApplyData();
   });
 
   onCleanup(() => map?.remove());
