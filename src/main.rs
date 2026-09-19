@@ -1,3 +1,4 @@
+mod auth;
 mod db;
 mod sync;
 
@@ -23,12 +24,7 @@ const OSM_TILE_URL: &str = "https://tile.openstreetmap.org";
 struct AppState {
     client: Arc<Client>,
     db: Arc<Mutex<Connection>>,
-    auth_password: Option<String>,
-}
-
-#[derive(Deserialize)]
-struct LoginRequest {
-    password: String,
+    auth: Arc<auth::AuthMode>,
 }
 
 #[derive(Deserialize)]
@@ -102,17 +98,12 @@ async fn main() {
         }
     }
 
-    let auth_password = std::env::var("AUTH_PASSWORD")
-        .ok()
-        .filter(|s| !s.is_empty());
-    if auth_password.is_none() {
-        tracing::warn!("AUTH_PASSWORD not set — status updates are unauthenticated");
-    }
+    let auth = auth::build_auth_mode(&client).await;
 
     let state = AppState {
         client: Arc::new(client),
         db,
-        auth_password,
+        auth: Arc::new(auth),
     };
 
     let frontend_dist =
@@ -125,8 +116,11 @@ async fn main() {
         .route("/api/tiles/:z/:x/:y", get(proxy_tile))
         .route("/api/markers", get(list_markers))
         .route("/api/stations/:crs/status", patch(update_station_status))
-        .route("/api/auth/login", post(login))
-        .route("/api/auth/verify", get(verify_auth))
+        .route("/api/auth/login", post(auth::login))
+        .route("/api/auth/verify", get(auth::verify_auth))
+        .route("/api/auth/logout", post(auth::logout))
+        .route("/api/auth/oidc/login", get(auth::oidc_login))
+        .route("/api/auth/oidc/callback", get(auth::oidc_callback))
         .route("/api/stations/refresh", post(station_refresh))
         .route("/api/labels", get(list_labels).post(create_label))
         .route("/api/labels/:id", put(update_label).delete(delete_label))
@@ -169,36 +163,8 @@ where
     }
 }
 
-fn check_auth(state: &AppState, headers: &HeaderMap) -> bool {
-    match &state.auth_password {
-        None => true,
-        Some(pw) => headers
-            .get(header::AUTHORIZATION)
-            .and_then(|v| v.to_str().ok())
-            .and_then(|v| v.strip_prefix("Bearer "))
-            .map(|token| token == pw)
-            .unwrap_or(false),
-    }
-}
-
-async fn verify_auth(State(state): State<AppState>, headers: HeaderMap) -> StatusCode {
-    if check_auth(&state, &headers) {
-        StatusCode::NO_CONTENT
-    } else {
-        StatusCode::UNAUTHORIZED
-    }
-}
-
-async fn login(State(state): State<AppState>, Json(body): Json<LoginRequest>) -> impl IntoResponse {
-    match &state.auth_password {
-        None => StatusCode::OK.into_response(),
-        Some(pw) if *pw == body.password => StatusCode::OK.into_response(),
-        _ => StatusCode::UNAUTHORIZED.into_response(),
-    }
-}
-
 async fn station_refresh(State(state): State<AppState>, headers: HeaderMap) -> impl IntoResponse {
-    if !check_auth(&state, &headers) {
+    if !auth::check_auth(&state.auth, &headers) {
         return StatusCode::UNAUTHORIZED.into_response();
     }
 
@@ -290,7 +256,7 @@ async fn create_label(
     headers: HeaderMap,
     Json(body): Json<LabelBody>,
 ) -> Response {
-    if !check_auth(&state, &headers) {
+    if !auth::check_auth(&state.auth, &headers) {
         return StatusCode::UNAUTHORIZED.into_response();
     }
     match db_op(state.db, move |conn| {
@@ -309,7 +275,7 @@ async fn update_label(
     headers: HeaderMap,
     Json(body): Json<LabelBody>,
 ) -> StatusCode {
-    if !check_auth(&state, &headers) {
+    if !auth::check_auth(&state.auth, &headers) {
         return StatusCode::UNAUTHORIZED;
     }
     match db_op(state.db, move |conn| {
@@ -328,7 +294,7 @@ async fn delete_label(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> StatusCode {
-    if !check_auth(&state, &headers) {
+    if !auth::check_auth(&state.auth, &headers) {
         return StatusCode::UNAUTHORIZED;
     }
     match db_op(state.db, move |conn| db::delete_label(conn, id)).await {
@@ -344,7 +310,7 @@ async fn add_station_label(
     headers: HeaderMap,
     Json(body): Json<AssignLabelBody>,
 ) -> StatusCode {
-    if !check_auth(&state, &headers) {
+    if !auth::check_auth(&state.auth, &headers) {
         return StatusCode::UNAUTHORIZED;
     }
     match db_op(state.db, move |conn| {
@@ -362,7 +328,7 @@ async fn remove_station_label(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> StatusCode {
-    if !check_auth(&state, &headers) {
+    if !auth::check_auth(&state.auth, &headers) {
         return StatusCode::UNAUTHORIZED;
     }
     match db_op(state.db, move |conn| {
@@ -382,7 +348,7 @@ async fn update_station_status(
     headers: HeaderMap,
     Json(body): Json<StatusUpdate>,
 ) -> StatusCode {
-    if !check_auth(&state, &headers) {
+    if !auth::check_auth(&state.auth, &headers) {
         return StatusCode::UNAUTHORIZED;
     }
     let status = body.status.as_str().to_string();

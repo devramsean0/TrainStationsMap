@@ -82,6 +82,7 @@ function getIcon(colour: string): L.DivIcon {
 const [authRequired, setAuthRequired] = createSignal(false);
 const [authed, setAuthed] = createSignal(false);
 const [authToken, setAuthToken] = createSignal<string | null>(null);
+const [authMode, setAuthMode] = createSignal<"none" | "password" | "oidc">("none");
 
 // buildPopup reads authed() at call time. Leaflet's lazy function binding means
 // this is called fresh on every popup open, so auth changes are reflected.
@@ -123,6 +124,10 @@ function buildPopup(m: MarkerData): string {
 }
 
 async function login() {
+  if (authMode() === "oidc") {
+    window.location.href = "/api/auth/oidc/login";
+    return;
+  }
   const pw = window.prompt("Enter password:");
   if (!pw) return;
   const res = await fetch("/api/auth/login", {
@@ -139,7 +144,10 @@ async function login() {
   }
 }
 
-function logout() {
+async function logout() {
+  // Unconditional so the OIDC session cookie actually gets cleared server-side;
+  // it's a harmless no-op in password/no-auth mode.
+  await fetch("/api/auth/logout", { method: "POST", credentials: "include" });
   sessionStorage.removeItem("authToken");
   setAuthToken(null);
   setAuthed(false);
@@ -239,6 +247,7 @@ export default function App() {
     const res = await fetch(`/api/stations/${crs}/status`, {
       method: "PATCH",
       headers: authHeaders(),
+      credentials: "include",
       body: JSON.stringify({ status }),
     });
 
@@ -260,12 +269,14 @@ export default function App() {
       await fetch(`/api/stations/${crs}/labels/${labelId}`, {
         method: "DELETE",
         headers: authHeaders(),
+        credentials: "include",
       });
       patchStation((s) => s.crs === crs, (s) => ({ labels: s.labels.filter((id) => id !== labelId) }));
     } else {
       await fetch(`/api/stations/${crs}/labels`, {
         method: "POST",
         headers: authHeaders(),
+        credentials: "include",
         body: JSON.stringify({ label_id: labelId }),
       });
       patchStation((s) => s.crs === crs, (s) => ({ labels: [...s.labels, labelId] }));
@@ -281,6 +292,7 @@ export default function App() {
       const res = await fetch(`/api/labels/${editId}`, {
         method: "PUT",
         headers: authHeaders(),
+        credentials: "include",
         body: JSON.stringify({ name, colour: formColour() }),
       });
       if (res.ok || res.status === 204) {
@@ -293,6 +305,7 @@ export default function App() {
       const res = await fetch("/api/labels", {
         method: "POST",
         headers: authHeaders(),
+        credentials: "include",
         body: JSON.stringify({ name, colour: formColour() }),
       });
       if (res.ok) {
@@ -326,6 +339,7 @@ export default function App() {
     const res = await fetch(`/api/labels/${id}`, {
       method: "DELETE",
       headers: authHeaders(),
+      credentials: "include",
     });
     if (res.ok || res.status === 204) {
       setLabels((prev) => prev.filter((l) => l.id !== id));
@@ -387,24 +401,22 @@ export default function App() {
     applyData(markersData, labelsData);
   }
 
-  // The server ignores the Authorization header entirely when no password is
-  // configured (always 204), and can only 401 when one is — so a single call,
-  // sent with whatever token we have, is enough to resolve both authRequired
-  // and authed. No need for a separate no-credentials probe first.
+  // The server always answers with {authed, mode} now (200), so a single call —
+  // sent with whatever bearer token we have plus any OIDC session cookie — is
+  // enough to resolve authMode/authRequired/authed together.
   async function verifyAuth() {
     const stored = sessionStorage.getItem("authToken");
-    const res = await fetch(
-      "/api/auth/verify",
-      stored ? { headers: { Authorization: `Bearer ${stored}` } } : undefined,
-    );
-    if (res.ok) {
-      setAuthRequired(!!stored);
-      if (stored) setAuthToken(stored);
-      setAuthed(true);
-    } else {
-      // A 401 only happens when a password is configured, so auth is required.
-      setAuthRequired(true);
-      setAuthed(false);
+    const res = await fetch("/api/auth/verify", {
+      credentials: "include",
+      ...(stored ? { headers: { Authorization: `Bearer ${stored}` } } : {}),
+    });
+    const body = (await res.json()) as { authed: boolean; mode: "none" | "password" | "oidc" };
+    setAuthMode(body.mode);
+    setAuthRequired(body.mode !== "none");
+    setAuthed(body.authed);
+    if (body.mode === "password" && stored && body.authed) {
+      setAuthToken(stored);
+    } else if (!body.authed) {
       sessionStorage.removeItem("authToken");
     }
   }
@@ -414,7 +426,11 @@ export default function App() {
     setSyncResult(null);
 
     try {
-      const res = await fetch("/api/stations/refresh", { method: "POST", headers: authHeaders() });
+      const res = await fetch("/api/stations/refresh", {
+        method: "POST",
+        headers: authHeaders(),
+        credentials: "include",
+      });
       if (res.ok) {
         const s = (await res.json()) as SyncStats;
         setSyncResult(
@@ -458,6 +474,17 @@ export default function App() {
       const withColour = cachedStations.map((s) => ({ ...s, colour: computeColour(s) }));
       setStations(withColour);
       rebuildMarkers(withColour);
+    }
+
+    // Surface an OIDC login failure passed back via the callback redirect, then
+    // strip it so a refresh doesn't re-show it.
+    const params = new URLSearchParams(location.search);
+    const oidcError = params.get("oidc_error");
+    if (oidcError) {
+      alert(oidcError);
+      params.delete("oidc_error");
+      const qs = params.toString();
+      history.replaceState(null, "", location.pathname + (qs ? `?${qs}` : ""));
     }
 
     // Auth check and data fetch run concurrently — neither blocks the other.

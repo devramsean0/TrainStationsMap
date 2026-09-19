@@ -19,6 +19,11 @@ This is configured through a couple of environment variables
 | RDM_TOCS_API_KEY | The "Consumer Key" of the Knowledgebase TOCS data prodict | T9axxxxxxxxxxxxxxxxxxxxxx5Drt |
 | RDM_STATIONS_API_KEY | The "Consumer Key" of the Knowledgebase Stations data prodict | T9axxxxxxxxxxxxxxxxxxxxxx5Drt |
 | ADDR | The address + port to listen on, OPTIONAL, has a default | 0.0.0.0:3000 |
+| OIDC_ISSUER_URL | OIDC issuer base URL; setting this switches the whole instance to OIDC auth  | https://accounts.example.com |
+| OIDC_CLIENT_ID | OAuth2/OIDC client ID registered with the issuer | my-client-id |
+| OIDC_CLIENT_SECRET | OAuth2/OIDC client secret registered with the issuer | my-client-secret |
+| OIDC_REDIRECT_URL | Full public callback URL the IdP redirects back to | https://host/api/auth/oidc/callback |
+
 
 You also need to give the stations.db file and the tile_cache folder a persistent location as they store the state and cache the OSM tiles. This is obviously different per method and covered below
 

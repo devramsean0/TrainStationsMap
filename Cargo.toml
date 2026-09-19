@@ -21,3 +21,5 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 quick-xml = "0.36"
 anyhow = "1"
 dotenv = "0.15.0"
+openidconnect = "4"
+rand = "0.8.5"
