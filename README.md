@@ -13,7 +13,7 @@ You also need a server capable of running either a docker container or a nix der
 ## Configuration
 This is configured through a couple of environment variables
 | Variable | Description | Example |
-| --- | --- | --- | --- |
+| --- | --- | --- |
 | RUST_LOG | The Log Level of the rust webserver | info |
 | AUTH_PASSWORD | The password you will use to "sign in" | Password1234 | 
 | RDM_TOCS_API_KEY | The "Consumer Key" of the Knowledgebase TOCS data prodict | T9axxxxxxxxxxxxxxxxxxxxxx5Drt |
